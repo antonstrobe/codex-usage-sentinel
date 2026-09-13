@@ -1,7 +1,9 @@
 param([switch]$SourcesOnly)
 $ErrorActionPreference='Stop'
-$sourceFiles=@('README.md','AGENTS.md','build.ps1','test.ps1','verify-release.ps1','.gitignore','.gitattributes','.github\workflows\build.yml','docs\SETUP_WITH_CODEX.md')
+$sourceFiles=@('README.md','AGENTS.md','build.ps1','test.ps1','verify-release.ps1','.gitignore','.gitattributes','.github\workflows\build.yml','docs\SETUP_WITH_CODEX.md','docs\SECOND_COMPUTER.md')
 $sourceFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -File | ForEach-Object {'src\'+$_.Name})
+$sourceFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'relay') -File | ForEach-Object {'relay\'+$_.Name})
+$sourceFiles+=@('docs\SHARED_BOT.md')
 $releaseFiles=@('dist\CodexUsageSentinel.exe','dist\Build.exe','dist\SHA256SUMS.txt')
 if($SourcesOnly){$releaseFiles=@()}
 $patterns=@('\b\d{8,12}:[A-Za-z0-9_-]{30,50}\b','\bgh[pousr]_[A-Za-z0-9]{30,}\b','\bgithub_pat_[A-Za-z0-9_]{30,}\b','-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----','\bsk-[A-Za-z0-9_-]{30,}\b')

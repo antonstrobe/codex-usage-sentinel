@@ -1,0 +1,38 @@
+[Unit]
+Description=Codex usage shared Telegram relay
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=codex-usage-relay
+Group=codex-usage-relay
+WorkingDirectory=/opt/codex-usage-relay
+ExecStart=/usr/bin/python3 /opt/codex-usage-relay/relay.py
+LoadCredentialEncrypted=telegram-token:/etc/credstore.encrypted/codex-usage-relay.cred
+Environment=SENTINEL_CONFIG=/etc/codex-usage-relay/config.json
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=codex-usage-relay
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryMax=160M
+TasksMax=48
+
+[Install]
+WantedBy=multi-user.target

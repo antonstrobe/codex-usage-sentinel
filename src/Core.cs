@@ -26,12 +26,20 @@ namespace CodexUsageSentinel {
     public sealed class Settings {
         public int Version = 1;
         public string TokenProtected = "";
+        public string ConnectionMode = "direct";
+        public string RelayUrl = "";
+        public string RelayTokenProtected = "";
         public long ChatId = 0;
         public string Username = "";
         public string BotUsername = "";
         public string CodexPath = "";
         public string PausedUntilUtc = "";
-        public bool Ready { get { return ChatId > 0 && !string.IsNullOrEmpty(TokenProtected); } }
+        public bool Ready { get { return ChatId > 0 && (ConnectionMode=="relay" ? !string.IsNullOrEmpty(RelayTokenProtected) && RelayClient.ValidUrl(RelayUrl) : !string.IsNullOrEmpty(TokenProtected)); } }
+        public string RelayToken() {
+            try {return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(RelayTokenProtected),null,DataProtectionScope.CurrentUser));}
+            catch {throw new InvalidOperationException("Подключите этот компьютер через Start заново.");}
+        }
+        public void SetRelayToken(string token) {RelayTokenProtected=Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(token),null,DataProtectionScope.CurrentUser));}
         public string Token() {
             try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(TokenProtected), null, DataProtectionScope.CurrentUser)); }
             catch { throw new InvalidOperationException("Не удалось открыть токен. Введите его заново в настройках Telegram."); }

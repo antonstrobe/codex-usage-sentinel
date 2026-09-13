@@ -10,6 +10,17 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace CodexUsageSentinel {
+    public class RelayTransport : HttpMessageHandler {
+        public List<string> Bodies=new List<string>(),Paths=new List<string>();
+        public Func<int,HttpResponseMessage> Reply;
+        public bool HadAuth;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct) {
+            Paths.Add(request.RequestUri.AbsolutePath);Bodies.Add(request.Content==null ? "" : await request.Content.ReadAsStringAsync());
+            HadAuth=request.Headers.Authorization!=null && request.Headers.Authorization.Scheme=="Bearer";
+            return Reply(Paths.Count);
+        }
+        public static HttpResponseMessage Result(object body,int code=200) {return new HttpResponseMessage((HttpStatusCode)code) {Content=new StringContent(Json.Write(body),Encoding.UTF8,"application/json")};}
+    }
     public class FakeTransport : HttpMessageHandler {
         public List<string> Methods=new List<string>(),Bodies=new List<string>();
         public Func<string,string> Reply;
@@ -32,7 +43,74 @@ namespace CodexUsageSentinel {
         static int Drain(AlertPolicy policy) {int n=0;while(policy.Next(Now)!=null && n<1000){var item=policy.Next(Now);if(item.Continuous)break;policy.Acknowledge(item);n++;}return n;}
         static Settings TestSettings() {var settings=new Settings {ChatId=123,Username="example_user",BotUsername="ExampleOld_bot"};settings.SetToken("123456:"+new string('a',35));return settings;}
         static string Ok(object result) {return Json.Write(new {ok=true,result=result});}
-        public static int Main() {
+        [STAThread] public static int Main(string[] args) {
+            if(args.Length==2 && args[0]=="--render-relay") {
+                System.Windows.Forms.Application.EnableVisualStyles();
+                using(var monitor=new Monitor(new Settings(),new AlertState()))
+                using(var form=new RelaySetupForm(monitor)) {
+                    form.Show();System.Windows.Forms.Application.DoEvents();
+                    using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)) {
+                        form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(System.Drawing.Point.Empty,bitmap.Size));bitmap.Save(args[1]);
+                    }
+                    form.Close();
+                }
+                return 0;
+            }
+            Test("relay URLs require HTTPS without embedded credentials",()=>{
+                Check(RelayClient.ValidUrl("https://example.com/relay"),"https");
+                foreach(var url in new[]{"http://example.com","https://user:password@example.com","https://example.com/?token=x","https://example.com/#x"})Check(!RelayClient.ValidUrl(url),"reject unsafe url");
+            });
+            Test("Start sends only credential hash and uses Telegram link",()=>{
+                var fake=new RelayTransport {Reply=n=>RelayTransport.Result(new {id=new string('a',32),bot_username="Example_bot",url="https://untrusted.example"})};
+                using(var relay=new RelayClient(fake)) {
+                    var pair=relay.Begin("https://example.com/relay","@USER_ONE","Example PC",CancellationToken.None).GetAwaiter().GetResult();
+                    Check(pair.Url=="https://t.me/Example_bot?start=c_"+new string('a',32),"safe link");
+                    Check(fake.Bodies[0].Contains(RelayClient.Hash(pair.Token)) && !fake.Bodies[0].Contains(pair.Token),"only hash transmitted");
+                    Check(!fake.HadAuth,"new enrollment has no owner credentials");
+                }
+            });
+            Test("Start waits then stores independent DPAPI device credentials",()=>{
+                var old=TestSettings();old.CodexPath="example-codex.exe";
+                var pair=new Pairing {Id=new string('a',32),Token=RelayClient.NewToken(),Username="user_two",BotUsername="Example_bot"};
+                var fake=new RelayTransport {Reply=n=>n==1 ? RelayTransport.Result(new {state="waiting"}) : RelayTransport.Result(new {state="connected",chat_id=222,username="user_two",bot_username="Example_bot"})};
+                using(var relay=new RelayClient(fake)) {
+                    Check(relay.Finish("https://example.com",pair,old,CancellationToken.None).GetAwaiter().GetResult()==null,"not connected early");
+                    var result=relay.Finish("https://example.com",pair,old,CancellationToken.None).GetAwaiter().GetResult();
+                    Check(result.Ready && result.ConnectionMode=="relay" && result.ChatId==222 && result.TokenProtected=="" && result.RelayToken()==pair.Token,"independent connection");
+                    Check(result.CodexPath==old.CodexPath && old.ChatId==123 && old.ConnectionMode=="direct","old preserved");
+                    Check(!Json.Write(result).Contains(pair.Token) && fake.HadAuth,"encrypted and authenticated");
+                }
+            });
+            Test("relay rejects mismatched recipient from pairing response",()=>{
+                var fake=new RelayTransport {Reply=n=>RelayTransport.Result(new {state="connected",chat_id=111,username="user_one",bot_username="Example_bot"})};
+                using(var relay=new RelayClient(fake))Throws(()=>relay.Finish("https://example.com",new Pairing {Id=new string('a',32),Token=RelayClient.NewToken(),Username="user_two",BotUsername="Example_bot"},new Settings(),CancellationToken.None).GetAwaiter().GetResult());
+            });
+            Test("relay send routes without bot token or client destination",()=>{
+                var settings=new Settings {ConnectionMode="relay",RelayUrl="https://example.com",ChatId=222};settings.SetRelayToken(RelayClient.NewToken());
+                var direct=new FakeTransport {Reply=m=>{throw new Exception("must not call Telegram directly");}};
+                var fake=new RelayTransport {Reply=n=>RelayTransport.Result(new {state="sent"})};
+                using(var bot=new Telegram(direct,fake))Check(bot.Send(settings,"Test",()=>true,CancellationToken.None).GetAwaiter().GetResult(),"sent");
+                Check(direct.Methods.Count==0 && fake.HadAuth && !fake.Bodies[0].Contains("chat_id"),"only device authorization");
+            });
+            Test("relay retries rate limit with same message id",()=>{
+                var settings=new Settings {ConnectionMode="relay",RelayUrl="https://example.com",ChatId=222};settings.SetRelayToken(RelayClient.NewToken());
+                var fake=new RelayTransport {Reply=n=>n==1 ? RelayTransport.Result(new {retry_after=2},429) : RelayTransport.Result(new {state="sent"})};
+                using(var relay=new RelayClient(fake))Check(relay.Send(settings,"Test",()=>true,CancellationToken.None).GetAwaiter().GetResult(),"sent after retry");
+                Check(fake.Bodies.Count==2 && fake.Bodies[0]==fake.Bodies[1],"same id and body");
+            });
+            Test("relay does not call server for stale alert",()=>{
+                var settings=new Settings {ConnectionMode="relay",RelayUrl="https://example.com",ChatId=222};settings.SetRelayToken(RelayClient.NewToken());
+                var fake=new RelayTransport {Reply=n=>RelayTransport.Result(new {state="sent"})};
+                using(var relay=new RelayClient(fake))Check(!relay.Send(settings,"Test",()=>false,CancellationToken.None).GetAwaiter().GetResult(),"stopped");
+                Check(fake.Bodies.Count==0,"no network");
+            });
+            Test("uncertain relay delivery never reported as sent",()=>{
+                var settings=new Settings {ConnectionMode="relay",RelayUrl="https://example.com",ChatId=222};settings.SetRelayToken(RelayClient.NewToken());
+                var fake=new RelayTransport {Reply=n=>RelayTransport.Result(new {state="unknown"})};
+                bool uncertain=false;
+                using(var relay=new RelayClient(fake))try{relay.Send(settings,"Test",()=>true,CancellationToken.None).GetAwaiter().GetResult();}catch(DeliveryUncertain){uncertain=true;}
+                Check(uncertain && fake.Bodies.Count==1,"uncertain result preserved");
+            });
             Test("fresh install contains no personal configuration",()=>{var s=new Settings();Check(!s.Ready && s.ChatId==0 && s.Username=="" && s.BotUsername=="" && s.TokenProtected=="","empty defaults");});
             Test("launch defaults to tray with explicit show override",()=>Check(Program.StartInTray(new string[0]) && Program.StartInTray(new [] {"--tray"}) && !Program.StartInTray(new [] {"--show"}),"tray default"));
             Test("explicit private id works without username",()=>{
@@ -45,6 +123,28 @@ namespace CodexUsageSentinel {
                 Check(!fake.Methods.Contains("getChat"),"old id not reused");
             });
             Test("fractional private ids rejected",()=>Throws(()=>Telegram.PrivateRecipient(Json.Read<object>("{\"id\":1.5,\"type\":\"private\"}"),"")));
+            Test("two users discover and receive only their own private chat",()=>{
+                Func<string,string> reply=m=>m=="getMe" ? Ok(new {username="ExampleNotify_bot",is_bot=true}) : m=="getWebhookInfo" ? Ok(new {url=""}) : m=="getUpdates" ? Ok(new [] {
+                    new {message=new {chat=new {id=111,type="private",username="user_one"},from=new {id=111}}},
+                    new {message=new {chat=new {id=222,type="private",username="user_two"},from=new {id=222}}}
+                }) : Ok(new {message_id=1});
+                var firstTransport=new FakeTransport {Reply=reply};var secondTransport=new FakeTransport {Reply=reply};
+                var empty=new Settings();string token="123456:"+new string('a',35);
+                using(var firstBot=new Telegram(firstTransport))using(var secondBot=new Telegram(secondTransport)) {
+                    var first=firstBot.Connect(empty,token,"","user_one",CancellationToken.None).GetAwaiter().GetResult();
+                    var second=secondBot.Connect(empty,token,"","@USER_TWO",CancellationToken.None).GetAwaiter().GetResult();
+                    Check(first.ChatId==111 && second.ChatId==222 && empty.ChatId==0,"independent settings");
+                    firstBot.Send(first,"first fixture",()=>true,CancellationToken.None).GetAwaiter().GetResult();
+                    secondBot.Send(second,"second fixture",()=>true,CancellationToken.None).GetAwaiter().GetResult();
+                    Check(Json.Number(Json.Get(Json.Read<object>(firstTransport.Bodies.Last()),"chat_id"))==111,"first destination");
+                    Check(Json.Number(Json.Get(Json.Read<object>(secondTransport.Bodies.Last()),"chat_id"))==222,"second destination");
+                }
+            });
+            Test("another person's Start does not connect the requested recipient",()=>{
+                var fake=new FakeTransport {Reply=m=>m=="getMe" ? Ok(new {username="ExampleNotify_bot",is_bot=true}) : m=="getWebhookInfo" ? Ok(new {url=""}) : Ok(new [] {new {message=new {chat=new {id=111,type="private",username="user_one"},from=new {id=111}}}})};
+                using(var bot=new Telegram(fake))Throws(()=>bot.Connect(new Settings(),"123456:"+new string('a',35),"","user_two",CancellationToken.None).GetAwaiter().GetResult());
+                Check(!fake.Methods.Contains("sendMessage"),"no messages to another user");
+            });
             Test("remaining is 100 minus used",()=>Check(UsageAt(90).Remaining==90,"90"));
             Test("minimum across core windows",()=>Check(UsageAt(90,4).Remaining==4,"4"));
             Test("reset count read",()=>Check(UsageAt(90).Resets==1,"count"));

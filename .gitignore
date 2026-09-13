@@ -20,3 +20,8 @@ auth.json
 .vs/
 .codex/
 update-local-*.ps1
+__pycache__/
+*.sqlite3*
+*.db
+relay/config.json
+*.cred

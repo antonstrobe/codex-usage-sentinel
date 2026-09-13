@@ -191,13 +191,13 @@ namespace CodexUsageSentinel {
         void OpenStartupFolder() {try{Startup.OpenFolder();}catch{ShowError("Не удалось открыть папку. Нажмите Win+R, введите shell:startup и нажмите Enter.");}}
         void Reveal() {Show();WindowState=FormWindowState.Normal;Activate();}
         void Quit() {quitting=true;Close();}
-        void Setup() {using(var f=new SetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
+        void Setup() {using(var f=new RelaySetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
         async void Test(int total=10) {
             if(testing)return;
             testing=true;test.Enabled=false;RefreshStatus();
             try{for(int number=1;number<=total;number++)await monitor.TestMessage(number,total);}
             catch(OperationCanceledException){}
-            catch(Exception ex){if(!IsDisposed)ShowError(ex is TelegramFailure || ex is InvalidOperationException ? ex.Message : "Не удалось отправить тестовое сообщение.");}
+            catch(Exception ex){if(!IsDisposed)ShowError(ex is TelegramFailure || ex is DeliveryUncertain || ex is InvalidOperationException ? ex.Message : "Не удалось отправить тестовое сообщение.");}
             finally{testing=false;if(!IsDisposed){test.Enabled=monitor.Settings.Ready;RefreshStatus();}}
         }
         void ToggleStartup() {if(Startup.InStartupFolder){ShowError("EXE уже находится в папке автозагрузки. Для отключения переместите его в другую папку; там будет доступна кнопка включения и выключения автозапуска.");return;}try{Startup.Toggle();RefreshStatus();}catch{ShowError("Не удалось изменить автозапуск. Можно положить EXE или ярлык в папку shell:startup.");}}

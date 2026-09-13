@@ -17,6 +17,8 @@ jobs:
       - name: Run offline tests
         shell: powershell
         run: .\test.ps1
+      - name: Test shared bot relay
+        run: python -B -m unittest discover -s relay -v
       - name: Verify release files
         shell: powershell
         run: .\verify-release.ps1

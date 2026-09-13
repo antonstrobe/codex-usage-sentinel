@@ -13,13 +13,15 @@ using System.Threading.Tasks;
 namespace CodexUsageSentinel {
     public sealed class TelegramFailure : Exception {
         public int RetrySeconds;
+        public bool RateLimited;
         public TelegramFailure(string message,int retry=10) : base(message) { RetrySeconds=retry; }
     }
     public sealed class Telegram : IDisposable {
         readonly HttpClient http;
+        readonly RelayClient relay;
         readonly SemaphoreSlim sendGate = new SemaphoreSlim(1,1);
         DateTime nextSendUtc=DateTime.MinValue;
-        public Telegram(HttpMessageHandler handler=null) { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; http=new HttpClient(handler??new HttpClientHandler {AllowAutoRedirect=false});http.Timeout=TimeSpan.FromSeconds(15); }
+        public Telegram(HttpMessageHandler handler=null,HttpMessageHandler relayHandler=null) { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; http=new HttpClient(handler??new HttpClientHandler {AllowAutoRedirect=false});http.Timeout=TimeSpan.FromSeconds(15);relay=new RelayClient(relayHandler); }
         public static int RetryDelay(object response) {
             double n=Json.Number(Json.Get(Json.Get(response,"parameters"),"retry_after")) ?? 10;
             return (int)Math.Min(86400,Math.Max(2,n+1));
@@ -97,13 +99,17 @@ namespace CodexUsageSentinel {
                 if(!stillNeeded()) return false;
                 if(!settings.Ready) throw new TelegramFailure("Сначала подключите личный Telegram-чат.");
                 try {
+                    if(settings.ConnectionMode=="relay") {
+                        bool delivered=await relay.Send(settings,text,stillNeeded,ct);
+                        nextSendUtc=DateTime.UtcNow.AddSeconds(2);return delivered;
+                    }
                     await Call(settings.Token(),"sendMessage",new {chat_id=settings.ChatId,text=text,disable_notification=false},ct);
                     nextSendUtc=DateTime.UtcNow.AddSeconds(2);
                     return true;
                 } catch(TelegramFailure ex) {nextSendUtc=DateTime.UtcNow.AddSeconds(ex.RetrySeconds);throw;}
             } finally {sendGate.Release();}
         }
-        public void Dispose() {http.Dispose();}
+        public void Dispose() {http.Dispose();relay.Dispose();}
     }
     public sealed class Monitor : IDisposable {
         readonly object gate=new object();
@@ -192,7 +198,11 @@ namespace CodexUsageSentinel {
                             if(sent) lock(gate) {outagePending=false;outageSent=true;SentCount++;}
                         }
                         if(sent) {TelegramStatus="Доставлено в Telegram · "+DateTime.Now.ToString("HH:mm:ss");Notify();}
-                    } catch(TelegramFailure ex) {TelegramStatus=ex.Message;Notify();retryWait=ex.RetrySeconds;}
+                    } catch(DeliveryUncertain ex) {
+                        lock(gate){if(item!=null){policy.Acknowledge(item);Persist();}else{outagePending=false;outageSent=true;}}
+                        TelegramStatus=ex.Message;Notify();retryWait=10;
+                    }
+                    catch(TelegramFailure ex) {TelegramStatus=ex.Message;Notify();retryWait=ex.RetrySeconds;}
                     catch(OperationCanceledException) {throw;}
                     catch(Exception) {TelegramStatus="Ошибка отправки. Проверьте настройки Telegram.";Notify();retryWait=10;}
                     if(retryWait>0)await Task.Delay(TimeSpan.FromSeconds(retryWait),cancel.Token);
