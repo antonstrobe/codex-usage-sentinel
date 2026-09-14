@@ -45,10 +45,10 @@ namespace CodexUsageSentinel {
         static string Ok(object result) {return Json.Write(new {ok=true,result=result});}
         static AlarmRule Rule(string id="example-alarm",int percent=30,int count=7,int interval=15,bool continuous=false) {return new AlarmRule {Id=id,Percent=percent,MessageCount=count,IntervalSeconds=interval,Continuous=continuous};}
         [STAThread] public static int Main(string[] args) {
-            if(args.Length==2 && (args[0]=="--render-alarms" || args[0]=="--render-alarm-editor" || args[0]=="--render-main")) {
+            if(args.Length==2 && (args[0]=="--render-alarms" || args[0]=="--render-alarm-editor" || args[0]=="--render-main" || args[0]=="--render-group")) {
                 System.Windows.Forms.Application.EnableVisualStyles();
                 using(var monitor=new Monitor(new Settings(),new AlertState()))
-                using(var form=args[0]=="--render-alarms" ? (System.Windows.Forms.Form)new AlarmsForm(monitor) : args[0]=="--render-main" ? (System.Windows.Forms.Form)new MainForm(monitor,false,true,null) : new AlarmEditorForm(Rule(interval:60),true)) {
+                using(var form=args[0]=="--render-group" ? (System.Windows.Forms.Form)new GroupSetupForm(monitor) : args[0]=="--render-alarms" ? (System.Windows.Forms.Form)new AlarmsForm(monitor) : args[0]=="--render-main" ? (System.Windows.Forms.Form)new MainForm(monitor,false,true,null) : new AlarmEditorForm(Rule(interval:60),true)) {
                     form.Show();System.Windows.Forms.Application.DoEvents();
                     using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)) {form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(System.Drawing.Point.Empty,bitmap.Size));bitmap.Save(args[1]);}
                     form.Close();
@@ -290,6 +290,49 @@ namespace CodexUsageSentinel {
             Test("send cancellation predicate stops stale alerts",()=>{var fake=new FakeTransport {Reply=m=>Ok(new {message_id=1})};using(var bot=new Telegram(fake)){Check(!bot.Send(TestSettings(),"test",()=>false,CancellationToken.None).GetAwaiter().GetResult(),"cancel");Check(fake.Methods.Count==0,"no request");}});
             Test("all sends have at least two second spacing",()=>{var fake=new FakeTransport {Reply=m=>Ok(new {message_id=1})};using(var bot=new Telegram(fake)){var s=TestSettings();bot.Send(s,"test",()=>true,CancellationToken.None).GetAwaiter().GetResult();var watch=Stopwatch.StartNew();bot.Send(s,"test",()=>true,CancellationToken.None).GetAwaiter().GetResult();Check(watch.Elapsed.TotalSeconds>=1.95,"spacing");Check(fake.Bodies.All(b=>Json.Str(Json.Get(Json.Read<object>(b),"chat_id"))=="123"),"private id");}});
             Test("rate limit response raises controlled retry",()=>{var fake=new FakeTransport {Reply=m=>"{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":15}}"};using(var bot=new Telegram(fake)){try{bot.Send(TestSettings(),"test",()=>true,CancellationToken.None).GetAwaiter().GetResult();throw new Exception();}catch(TelegramFailure ex){Check(ex.RetrySeconds==16,"backoff");}}});
+            Test("old settings retain private destination",()=>{var s=Json.Read<Settings>("{\"ChatId\":123,\"TokenProtected\":\"opaque\"}");Check(s.Ready && s.RecipientMode=="private" && s.TargetChatId==123,"migration");});
+            Test("group validation rejects private channel fractional and out of range ids",()=>{
+                foreach(var chat in new object[]{new {id=-123,type="private"},new {id=-123,type="channel"},new {id=123,type="group"},new {id=-1.5,type="group"},new {id=-9007199254740992L,type="supergroup"}})Throws(()=>GroupConnection.Validate(Json.Read<object>(Json.Write(chat))));
+                Check(GroupConnection.Validate(Json.Read<object>("{\"id\":-1001234567890,\"type\":\"supergroup\"}"))==-1001234567890L,"64 bit group id");
+            });
+            Test("group connection verifies destination and keeps private settings",()=>{
+                var old=TestSettings();old.Alarms=new List<AlarmRule>{Rule()};old.PausedUntilUtc=Now.AddMinutes(8).ToString("o");
+                var fake=new FakeTransport {Reply=m=>m=="getMe" ? Ok(new {id=555,is_bot=true,username="ExampleOld_bot"}) : m=="getChat" ? Ok(new {id=-999,type="group",title="Example group"}) : Ok(new {status="member"})};
+                using(var bot=new Telegram(fake)){var next=GroupConnection.Connect(bot,old,"-999",CancellationToken.None).GetAwaiter().GetResult();Check(next.Ready && next.TargetChatId==-999 && next.ChatId==123 && next.Username==old.Username && next.Token()==old.Token(),"only group selected, private preserved");Check(next.Alarms[0].Id==old.Alarms[0].Id && next.PausedUntilUtc==old.PausedUntilUtc && old.GroupChatId==0,"other state unchanged");Check(fake.Methods.SequenceEqual(new[]{"getMe","getChat","getChatMember"}),"no messages or update consumption");}
+            });
+            Test("wrong group or missing bot permission does not replace recipient",()=>{
+                foreach(var scenario in new[]{"wrong-id","left","kicked","restricted","read-only"}){
+                    var old=TestSettings();var fake=new FakeTransport {Reply=m=>m=="getMe" ? Ok(new {id=555,is_bot=true,username="ExampleOld_bot"}) : m=="getChat" ? Ok(new {id=scenario=="wrong-id" ? -888 : -999,type="group",title="Example",permissions=new {can_send_messages=scenario!="read-only"}}) : Ok(new {status=scenario=="read-only" ? "member" : scenario,is_member=true,can_send_messages=false})};
+                    using(var bot=new Telegram(fake))Throws(()=>GroupConnection.Connect(bot,old,"-999",CancellationToken.None).GetAwaiter().GetResult());Check(old.TargetChatId==123 && old.GroupChatId==0 && !fake.Methods.Contains("sendMessage"),"no mutation or send");
+                }
+            });
+            Test("group discovery reads group events without acknowledging updates",()=>{
+                var fake=new FakeTransport {Reply=m=>m=="getWebhookInfo" ? Ok(new {url=""}) : Ok(new object[]{new {my_chat_member=new {chat=new {id=-999,type="group",title="Example"}}},new {message=new {chat=new {id=123,type="private",title="ignore"}}},new {message=new {chat=new {id=-999,type="group",title="Example"}}}})};
+                using(var bot=new Telegram(fake)){var groups=GroupConnection.Find(bot,TestSettings(),CancellationToken.None).GetAwaiter().GetResult();Check(groups.Count==1 && groups[0].Id==-999,"only group once");Check(!fake.Bodies.Any(b=>b.Contains("offset") || b.Contains("allowed_updates")),"read only lookup");}
+            });
+            Test("group discovery preserves existing webhook",()=>{var fake=new FakeTransport {Reply=m=>Ok(new {url="https://example.invalid/hook"})};using(var bot=new Telegram(fake))Throws(()=>GroupConnection.Find(bot,TestSettings(),CancellationToken.None).GetAwaiter().GetResult());Check(fake.Methods.SequenceEqual(new[]{"getWebhookInfo"}),"no competing consumer");});
+            Test("selected group receives sends and failures never fall back to private",()=>{
+                foreach(bool fail in new[]{false,true}){var s=TestSettings();s.RecipientMode="group";s.GroupChatId=-999;var fake=new FakeTransport {Reply=m=>fail ? "{\"ok\":false,\"error_code\":403}" : Ok(new {message_id=7})};
+                    using(var bot=new Telegram(fake)){if(fail)Throws(()=>bot.Send(s,"test",()=>true,CancellationToken.None).GetAwaiter().GetResult());else Check(bot.Send(s,"test",()=>true,CancellationToken.None).GetAwaiter().GetResult(),"delivered");}Check(fake.Bodies.Count==1 && Json.Str(Json.Get(Json.Read<object>(fake.Bodies[0]),"chat_id"))=="-999","group only");}
+            });
+            Test("unconfigured group invalid mode and relay group cannot send privately",()=>{
+                foreach(var mode in new[]{"group","unknown","relay-group"}){var s=TestSettings();s.RecipientMode=mode=="unknown" ? "unknown" : "group";if(mode=="relay-group"){s.ConnectionMode="relay";s.GroupChatId=-999;s.RelayUrl="https://example.com";s.SetRelayToken(RelayClient.NewToken());}var fake=new FakeTransport {Reply=m=>Ok(new {message_id=1})};using(var bot=new Telegram(fake))Throws(()=>bot.Send(s,"test",()=>true,CancellationToken.None).GetAwaiter().GetResult());Check(!s.Ready && fake.Methods.Count==0,"no fallback");}
+            });
+            Test("same bot reconnect keeps group choice new token clears it",()=>{
+                foreach(bool replacement in new[]{false,true}){var old=TestSettings();old.GroupChatId=-999;old.GroupTitle="Example";old.RecipientMode="group";var fake=new FakeTransport {Reply=m=>m=="getMe" ? Ok(new {username="ExampleOld_bot",is_bot=true}) : Ok(new {id=123,type="private",username="example_user"})};using(var bot=new Telegram(fake)){var next=bot.Connect(old,replacement ? "123456:"+new string('b',35) : "","123",CancellationToken.None).GetAwaiter().GetResult();Check(replacement ? next.RecipientMode=="private" && next.GroupChatId==0 : next.RecipientMode=="group" && next.GroupChatId==-999,"recipient validity follows bot");}}
+            });
+            Test("recipient switch persists both targets and cancels a queued old send",()=>{
+                string previousRoot=Storage.Root;string root=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"sentinel-recipient-"+Guid.NewGuid().ToString("N"));Storage.Root=root;
+                try {var original=TestSettings();original.GroupChatId=-999;original.GroupTitle="Example";using(var monitor=new Monitor(original,new AlertState())){
+                    var fake=new FakeTransport {Reply=m=>Ok(new {message_id=1})};using(var bot=new Telegram(fake)){
+                        bot.Send(original,"first",()=>true,CancellationToken.None).GetAwaiter().GetResult();var pending=bot.Send(original,"stale",()=>original==monitor.Settings,CancellationToken.None);
+                        monitor.SelectRecipient("group");Check(!pending.GetAwaiter().GetResult() && fake.Bodies.Count==1,"stale send cancelled after wait");
+                        var saved=Storage.Load<Settings>("settings.json");Check(saved.RecipientMode=="group" && saved.ChatId==123 && saved.GroupChatId==-999,"selection persisted");
+                        monitor.SelectRecipient("private");Check(monitor.Settings.TargetChatId==123 && monitor.Settings.GroupChatId==-999,"switch back retains group");
+                        var current=monitor.Settings;Throws(()=>monitor.SelectRecipient("invalid"));Check(object.ReferenceEquals(current,monitor.Settings),"invalid mode unchanged");
+                    }
+                }}finally{Storage.Root=previousRoot;foreach(string name in new[]{"settings.json","settings.json.new","alerts.json","alerts.json.new"}){string file=System.IO.Path.Combine(root,name);if(System.IO.File.Exists(file))System.IO.File.Delete(file);}if(System.IO.Directory.Exists(root))System.IO.Directory.Delete(root);}
+            });
             Console.WriteLine("RESULT "+passed+" passed; "+failed+" failed");return failed==0 ? 0 : 1;
         }
     }

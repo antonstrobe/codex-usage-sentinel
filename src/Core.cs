@@ -30,12 +30,22 @@ namespace CodexUsageSentinel {
         public string RelayUrl = "";
         public string RelayTokenProtected = "";
         public long ChatId = 0;
+        public string RecipientMode = "private";
+        public long GroupChatId = 0;
+        public string GroupTitle = "";
         public string Username = "";
         public string BotUsername = "";
         public string CodexPath = "";
         public string PausedUntilUtc = "";
         public List<AlarmRule> Alarms = AlarmRule.Defaults();
-        public bool Ready { get { return ChatId > 0 && (ConnectionMode=="relay" ? !string.IsNullOrEmpty(RelayTokenProtected) && RelayClient.ValidUrl(RelayUrl) : !string.IsNullOrEmpty(TokenProtected)); } }
+        public long TargetChatId { get { return RecipientMode=="group" ? GroupChatId : RecipientMode=="private" ? ChatId : 0; } }
+        public bool Ready { get {
+            if(ConnectionMode=="relay") return RecipientMode=="private" && ChatId>0 && !string.IsNullOrEmpty(RelayTokenProtected) && RelayClient.ValidUrl(RelayUrl);
+            return ConnectionMode=="direct" && !string.IsNullOrEmpty(TokenProtected) &&
+                ((RecipientMode=="private" && ChatId>0) || (RecipientMode=="group" && GroupChatId<0));
+        } }
+        public string RecipientLabel { get { return RecipientMode=="group" ? "группа «"+(string.IsNullOrEmpty(GroupTitle) ? GroupChatId.ToString(CultureInfo.InvariantCulture) : GroupTitle)+"»" :
+            RecipientMode=="private" ? (string.IsNullOrEmpty(Username) ? "личный чат" : "@"+Username) : "получатель не выбран"; } }
         public string RelayToken() {
             try {return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(RelayTokenProtected),null,DataProtectionScope.CurrentUser));}
             catch {throw new InvalidOperationException("Подключите этот компьютер через Start заново.");}

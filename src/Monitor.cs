@@ -36,11 +36,11 @@ namespace CodexUsageSentinel {
                     if(Json.Get(data,"ok") is bool && (bool)Json.Get(data,"ok")) return Json.Get(data,"result");
                     int code=(int)(Json.Number(Json.Get(data,"error_code"))??(int)response.StatusCode);
                     if(code==429) throw new TelegramFailure("Telegram просит снизить частоту. Ожидание перед повтором.",RetryDelay(data));
-                    if(code==409) throw new TelegramFailure("Бот уже получает сообщения в другой программе. Укажите личный Chat ID вручную.",60);
+                    if(code==409) throw new TelegramFailure("Бот уже получает сообщения в другой программе. Укажите Chat ID вручную.",60);
                     if(code==401) throw new TelegramFailure("Telegram отклонил токен. Обновите его в настройках.",60);
-                    if(code==403) throw new TelegramFailure("Бот не может написать вам. Откройте бота, нажмите Start и снимите блокировку.",60);
-                    if(code==400 && (method=="getChat" || method=="sendMessage")) throw new TelegramFailure("Личный чат недоступен. Откройте вашего бота, нажмите Start и проверьте личный Chat ID.",60);
-                    throw new TelegramFailure("Ошибка Telegram ("+code+"). Проверьте токен и личный Chat ID.",15);
+                    if(code==403) throw new TelegramFailure("Бот не может отправить в выбранный чат. Для личного чата нажмите Start; для группы проверьте участие и право отправки. Другой получатель не используется.",60);
+                    if(code==400 && (method=="getChat" || method=="sendMessage")) throw new TelegramFailure("Выбранный чат недоступен. Для личного чата нажмите Start; для группы проверьте ID и права бота. Другой получатель не используется.",60);
+                    throw new TelegramFailure("Ошибка Telegram ("+code+"). Проверьте токен и выбранный Chat ID.",15);
                 }
             } catch(OperationCanceledException) {ct.ThrowIfCancellationRequested(); throw new TelegramFailure("Telegram не ответил за 15 секунд.");}
             catch(HttpRequestException) {throw new TelegramFailure("Нет соединения с Telegram. Проверьте интернет.");}
@@ -88,6 +88,9 @@ namespace CodexUsageSentinel {
                 if(id==0) throw new TelegramFailure("Личный чат пока не найден. Напишите боту любое сообщение и повторите подключение, либо укажите свой числовой Chat ID.",30);
             }
             var settings=new Settings {ChatId=id,Username=username,BotUsername=botUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc,Alarms=AlarmRule.CheckedCopy(old.Alarms??AlarmRule.Defaults())};
+            if(old.ConnectionMode=="direct" && !string.IsNullOrEmpty(old.TokenProtected) && token==old.Token()) {
+                settings.GroupChatId=old.GroupChatId;settings.GroupTitle=old.GroupTitle;settings.RecipientMode=old.RecipientMode;
+            }
             settings.SetToken(token);
             return settings;
         }
@@ -97,13 +100,13 @@ namespace CodexUsageSentinel {
                 TimeSpan wait=nextSendUtc-DateTime.UtcNow;
                 if(wait>TimeSpan.Zero) await Task.Delay(wait,ct);
                 if(!stillNeeded()) return false;
-                if(!settings.Ready) throw new TelegramFailure("Сначала подключите личный Telegram-чат.");
+                if(!settings.Ready) throw new TelegramFailure("Сначала подключите выбранного получателя Telegram. Другой чат не используется.");
                 try {
                     if(settings.ConnectionMode=="relay") {
                         bool delivered=await relay.Send(settings,text,stillNeeded,ct);
                         nextSendUtc=DateTime.UtcNow.AddSeconds(2);return delivered;
                     }
-                    await Call(settings.Token(),"sendMessage",new {chat_id=settings.ChatId,text=text,disable_notification=false},ct);
+                    await Call(settings.Token(),"sendMessage",new {chat_id=settings.TargetChatId,text=text,disable_notification=false},ct);
                     nextSendUtc=DateTime.UtcNow.AddSeconds(2);
                     return true;
                 } catch(TelegramFailure ex) {nextSendUtc=DateTime.UtcNow.AddSeconds(ex.RetrySeconds);throw;}
@@ -139,6 +142,14 @@ namespace CodexUsageSentinel {
         }
         public void SetSettings(Settings settings) {
             lock(gate){settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());Storage.Save("settings.json",settings);Settings=settings;policy.SetRules(settings.Alarms);Persist();if(settings.Ready)TelegramStatus="Подключён · ожидание порога";}Notify();
+        }
+        public void SelectRecipient(string mode) {
+            lock(gate) {
+                if(mode!="private" && mode!="group")throw new InvalidOperationException("Выберите личный чат или группу.");
+                var next=Json.Read<Settings>(Json.Write(Settings));next.RecipientMode=mode;
+                if(!next.Ready)throw new InvalidOperationException(mode=="group" ? "Сначала подключите группу для этого бота." : "Сначала подключите личный Telegram-чат.");
+                SetSettings(next);
+            }
         }
         public List<AlarmRule> AlarmRules {get{lock(gate)return AlarmRule.CheckedCopy(Settings.Alarms);}}
         public void SetAlarms(IEnumerable<AlarmRule> rules) {

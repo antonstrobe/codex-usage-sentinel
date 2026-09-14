@@ -107,7 +107,7 @@ namespace CodexUsageSentinel {
         readonly ToolTip tips=Theme.Tooltips();
         readonly ToolStripMenuItem trayPause;
         Label remaining,subline,windows,health,telegram,detail,policy;
-        Button pause,test,telegramSetup;
+        Button pause,test,telegramSetup,privateRecipient,groupRecipient;
         bool quitting,testing;
         public MainForm(Monitor monitor,bool trayStart,bool renderOnly,EventWaitHandle showEvent) {
             this.monitor=monitor;this.renderOnly=renderOnly;this.showEvent=showEvent;
@@ -119,7 +119,7 @@ namespace CodexUsageSentinel {
             root.RowStyles.Add(new RowStyle(SizeType.Absolute,97));root.RowStyles.Add(new RowStyle(SizeType.Percent,100));root.RowStyles.Add(new RowStyle(SizeType.Absolute,96));Controls.Add(root);
             var header=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false};
             header.Controls.Add(Theme.Label("CODEX  /  USAGE SENTINEL",19,Theme.Text,FontStyle.Bold));
-            header.Controls.Add(Theme.Label("Лимиты под наблюдением · личные уведомления в Telegram",10,Theme.Muted));root.Controls.Add(header,0,0);
+            header.Controls.Add(Theme.Label("Лимиты под наблюдением · уведомления в выбранный чат Telegram",10,Theme.Muted));root.Controls.Add(header,0,0);
             var card=new Panel {Dock=DockStyle.Fill,BackColor=Theme.Panel,Padding=new Padding(20),Margin=new Padding(0,0,0,14)};
             remaining=Theme.Label("—",46,Theme.Green,FontStyle.Bold);remaining.Location=new Point(20,12);card.Controls.Add(remaining);
             subline=Theme.Label("Остаток основного лимита",11,Theme.Muted);subline.Location=new Point(25,93);card.Controls.Add(subline);
@@ -136,19 +136,24 @@ namespace CodexUsageSentinel {
             var check=Theme.Button("Проверить сейчас",()=>monitor.CheckNow(),true);buttons.Controls.Add(check);
             Theme.Describe(check,tips,"Проверить лимиты Codex сейчас. Это разовое действие; автоматическая проверка продолжается каждую минуту.");
             telegramSetup=Theme.Button("Telegram…",()=>Setup());buttons.Controls.Add(telegramSetup);
-            test=Theme.Button("Тест ×10",()=>Test());buttons.Controls.Add(test);
+            test=Theme.Button("Тестовое сообщение",()=>Test(1));buttons.Controls.Add(test);
             var testMenu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
-            testMenu.Items.Add("Отправить 1 тестовое сообщение",null,(s,e)=>Test(1));test.ContextMenuStrip=testMenu;
+            testMenu.Items.Add("Отправить 10 тестовых сообщений",null,(s,e)=>Test(10));test.ContextMenuStrip=testMenu;
             var codex=Theme.Button("Codex CLI…",()=>ChooseCodex());buttons.Controls.Add(codex);
             Theme.Describe(codex,tips,"Выбрать установленный codex.exe, через который программа читает лимиты.");
             var hide=Theme.Button("В трей",()=>Hide());buttons.Controls.Add(hide);buttons.SetFlowBreak(hide,true);
             Theme.Describe(hide,tips,"Свернуть окно в трей. Программа продолжит проверять лимиты и отправлять уведомления.");
             pause=Theme.Button("Пауза на 30 мин",()=>{try{monitor.Pause();RefreshStatus();}catch{ShowError("Не удалось сохранить паузу.");}});buttons.Controls.Add(pause);
+            privateRecipient=Theme.Button("Лично мне",()=>SelectRecipient("private"));buttons.Controls.Add(privateRecipient);
+            groupRecipient=Theme.Button("В группу",()=>SelectRecipient("group"));buttons.Controls.Add(groupRecipient);
+            var groupMenu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
+            groupMenu.Items.Add("Выбрать другую группу…",null,(s,e)=>SetupGroup());groupRecipient.ContextMenuStrip=groupMenu;
             root.Controls.Add(buttons,0,5);
             tray=new NotifyIcon {Icon=Icon,Text="Codex Usage Sentinel",Visible=!renderOnly};
             var menu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
             menu.Items.Add("Открыть",null,(s,e)=>Reveal());menu.Items.Add("Проверить лимиты",null,(s,e)=>monitor.CheckNow());
             menu.Items.Add("Настроить Telegram…",null,(s,e)=>{Reveal();Setup();});
+            menu.Items.Add("Настроить группу…",null,(s,e)=>{Reveal();SetupGroup();});
             menu.Items.Add("Будильники…",null,(s,e)=>{Reveal();OpenAlarms();});
             menu.Items.Add("Отправить 1 тестовое сообщение",null,(s,e)=>Test(1));
             trayPause=new ToolStripMenuItem("Пауза уведомлений выключена");
@@ -167,11 +172,17 @@ namespace CodexUsageSentinel {
         void Reveal() {Show();WindowState=FormWindowState.Normal;Activate();}
         void Quit() {quitting=true;Close();}
         void Setup() {using(var f=new RelaySetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
+        void SetupGroup() {using(var f=new GroupSetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
+        void SelectRecipient(string mode) {
+            if(mode=="group" && (monitor.Settings.ConnectionMode!="direct" || monitor.Settings.GroupChatId>=0)){SetupGroup();return;}
+            if(mode=="private" && monitor.Settings.ChatId<=0){Setup();if(monitor.Settings.ChatId<=0)return;}
+            try{monitor.SelectRecipient(mode);RefreshStatus();}catch(Exception ex){ShowError(ex is InvalidOperationException ? ex.Message : "Не удалось сохранить получателя. Прежний выбор сохранён.");}
+        }
         void OpenAlarms() {using(var f=new AlarmsForm(monitor))f.ShowDialog(this);RefreshStatus();}
-        async void Test(int total=10) {
+        async void Test(int total=1) {
             if(testing)return;
-            testing=true;test.Enabled=false;RefreshStatus();
-            try{for(int number=1;number<=total;number++)await monitor.TestMessage(number,total);}
+            testing=true;test.Enabled=false;var testSettings=monitor.Settings;RefreshStatus();
+            try{for(int number=1;number<=total;number++){if(testSettings!=monitor.Settings)throw new OperationCanceledException();await monitor.TestMessage(number,total);}}
             catch(OperationCanceledException){}
             catch(Exception ex){if(!IsDisposed)ShowError(ex is TelegramFailure || ex is DeliveryUncertain || ex is InvalidOperationException ? ex.Message : "Не удалось отправить тестовое сообщение.");}
             finally{testing=false;if(!IsDisposed){test.Enabled=monitor.Settings.Ready;RefreshStatus();}}
@@ -197,7 +208,7 @@ namespace CodexUsageSentinel {
             health.Text=monitor.ReadStatus+"\nПоследний успех: "+checkedAt+"   ·   Доступные сбросы: "+resets+
                 (monitor.NextCheckUtc>DateTime.UtcNow ? "\nСледующая проверка через "+Math.Ceiling((monitor.NextCheckUtc-DateTime.UtcNow).TotalSeconds)+" сек" : "");
             health.ForeColor=fresh ? Theme.Muted : Theme.Red;
-            telegram.Text=monitor.Settings.Ready ? "Telegram  @"+monitor.Settings.BotUsername+" → "+(monitor.Settings.Username=="" ? "личный чат "+monitor.Settings.ChatId : "@"+monitor.Settings.Username)+"\n"+monitor.TelegramStatus : "Telegram не подключён · нажмите «Telegram…»\nПолучатель: ваш личный чат";
+            telegram.Text="Получатель: "+monitor.Settings.RecipientLabel+" · только этот чат\n"+(monitor.Settings.Ready ? "@"+monitor.Settings.BotUsername+" · "+monitor.TelegramStatus : "Выбранный чат не подключён · настройте Telegram или группу");
             string extra=usage!=null ? string.Join("; ",usage.Windows.Where(w=>!w.Core).Select(w=>w.Label+" "+w.Remaining.ToString("0.#")+"%")) : "";
             detail.Text=(monitor.Paused ? "Уведомления на паузе до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm") : "Ручной запуск · после перезагрузки запустите снова. Закрытие окна — в трей.")+
                 "\n"+(monitor.StorageStatus!="" ? monitor.StorageStatus : Storage.Warning!="" ? Storage.Warning : "Другие лимиты (справочно): "+(extra=="" ? "нет данных" : extra));
@@ -206,9 +217,11 @@ namespace CodexUsageSentinel {
             string pauseHint=paused ? "Сейчас: пауза включена. Автоматические уведомления приостановлены до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm")+". Проверка лимитов продолжается.\nНажмите, чтобы возобновить уведомления." : "Сейчас: пауза выключена. Автоматические уведомления разрешены.\nНажмите, чтобы приостановить их на 30 минут. Проверка лимитов продолжится.";
             Theme.ToggleState(pause,tips,paused,pauseState,pauseHint);
             trayPause.Text=pauseState;trayPause.Checked=paused;trayPause.ToolTipText=pauseHint;
-            Theme.Describe(telegramSetup,tips,monitor.Settings.Ready ? "Сейчас: Telegram настроен для вашего личного чата.\nНажмите, чтобы открыть настройки подключения." : "Сейчас: Telegram не настроен.\nНажмите, чтобы подключить вашего бота и личный чат.");
-            test.Text=testing ? "Тест отправляется…" : "Тест ×10";
-            Theme.Describe(test,tips,testing ? "Сейчас программа отправляет тестовую серию. Дождитесь завершения; повторный запуск временно недоступен." : "Отправить 10 тестовых сообщений в ваш личный Telegram-чат с интервалом не менее 2 секунд. Правая кнопка мыши или Shift+F10 открывает одиночный тест. Это разовое действие.");
+            Theme.Describe(telegramSetup,tips,"Настроить бота и личный чат. Текущий получатель: "+monitor.Settings.RecipientLabel+".");
+            Theme.ToggleState(privateRecipient,tips,monitor.Settings.RecipientMode=="private","Лично мне",monitor.Settings.RecipientMode=="private" ? "Сейчас выбрана отправка только в личный чат. Повторное нажатие сохраняет этот выбор." : "Сейчас выбрана группа. Нажмите, чтобы отправлять только в ваш сохранённый личный чат.");
+            Theme.ToggleState(groupRecipient,tips,monitor.Settings.RecipientMode=="group","В группу",(monitor.Settings.RecipientMode=="group" ? "Сейчас выбрана только "+monitor.Settings.RecipientLabel+". Повторное нажатие сохраняет этот выбор." : "Нажмите, чтобы отправлять только в группу; при первом выборе откроется настройка.")+"\nПравая кнопка мыши или Shift+F10 — выбрать другую группу. Уже переданный Telegram запрос может завершиться после переключения.");
+            test.Text=testing ? "Тест отправляется…" : "Тестовое сообщение";
+            Theme.Describe(test,tips,testing ? "Сейчас программа отправляет тест. Дождитесь завершения; повторный запуск временно недоступен." : "Отправить одно сообщение: "+monitor.Settings.RecipientLabel+". Правая кнопка мыши или Shift+F10 — серия из 10 с интервалом не менее 2 секунд. Это разовое действие; пауза автоматических уведомлений не мешает тесту.");
             test.Enabled=monitor.Settings.Ready && !testing;
             tray.Text="Codex: "+(fresh ? remaining.Text+" осталось" : "нет свежих данных")+(monitor.Paused ? " · пауза" : "");
         }
