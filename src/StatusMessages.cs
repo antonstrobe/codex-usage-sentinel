@@ -50,10 +50,7 @@ namespace CodexUsageSentinel {
         public static string Key(Settings settings){return settings.Token().Split(':')[0]+":"+settings.TargetChatId.ToString(CultureInfo.InvariantCulture);}
         public static string Format(Usage usage,bool fresh,bool paused,DateTime now) {
             bool current=fresh && usage!=null && now-usage.CheckedUtc<=TimeSpan.FromSeconds(90);
-            return "📊 CODEX · ТЕКУЩИЙ СТАТУС\n"+(current ? "Осталось: "+usage.Remaining.ToString("0.#",CultureInfo.InvariantCulture)+"%\n\n"+usage.Description() :
-                "Нет свежих данных о лимитах. Повторная проверка каждую минуту."+(usage==null ? "" : "\nПоследний успешный замер: "+usage.CheckedUtc.ToLocalTime().ToString("dd.MM HH:mm:ss")))+
-                "\n\n"+(paused ? "Будильники на паузе; тихий статус продолжает обновляться." : "При низком остатке будильники приходят отдельно со звуком.")+
-                "\nОбновлено: "+now.ToLocalTime().ToString("dd.MM HH:mm:ss")+"\nСтатус обновляется без звука, пока монитор работает.";
+            return current ? usage.Remaining.ToString("0.#",CultureInfo.InvariantCulture)+"%" : "—%";
         }
         public async Task<string> Update(Telegram bot,Settings settings,string text,bool moveToBottom,bool recover,Func<bool> stillNeeded,CancellationToken ct) {
             await gate.WaitAsync(ct);

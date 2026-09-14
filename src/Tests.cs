@@ -376,8 +376,10 @@ namespace CodexUsageSentinel {
             Test("quiet status disabled or relay cannot create a message",()=>{
                 foreach(bool relay in new[]{false,true}){var s=StatusSettings();if(relay)s.ConnectionMode="relay";else s.LiveStatusEnabled=false;var fake=StatusTransport();using(var bot=new Telegram(fake))new StatusPublisher(new StatusMessageState(),v=>{}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();Check(fake.Methods.Count==0,"no send");}
             });
-            Test("quiet status freshness is explicit and alarm pause does not hide percentages",()=>{
-                var usage=UsageAt(45);Check(StatusPublisher.Format(usage,true,true,Now).Contains("45%") && StatusPublisher.Format(usage,true,true,Now).Contains("на паузе"),"visible while paused");Check(StatusPublisher.Format(usage,false,false,Now).Contains("Нет свежих данных") && !StatusPublisher.Format(usage,true,false,Now.AddMinutes(3)).Contains("45%"),"no stale percentages presented as current");
+            Test("quiet status is only a percentage and never presents stale data as current",()=>{
+                var usage=UsageAt(45);
+                Check(StatusPublisher.Format(usage,true,false,Now)=="45%" && StatusPublisher.Format(usage,true,true,Now)=="45%","exact percentage with or without alarm pause");
+                Check(StatusPublisher.Format(usage,false,false,Now)=="—%" && StatusPublisher.Format(usage,true,false,Now.AddMinutes(3))=="—%" && StatusPublisher.Format(null,true,false,Now)=="—%","missing or stale data has no numeric percentage");
             });
             Test("status rate limit is respected without ambiguous-create lock",()=>{
                 var s=StatusSettings();var state=new StatusMessageState();var fake=new FakeTransport {Reply=m=>"{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":12}}"};using(var bot=new Telegram(fake)){try{new StatusPublisher(state,v=>{}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();throw new Exception();}catch(TelegramFailure ex){Check(ex.RateLimited && ex.RetrySeconds==13 && !state.Messages.Values.Single().Creating,"explicit rejection can retry later");}}
