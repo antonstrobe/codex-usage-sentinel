@@ -7,5 +7,5 @@ using System.Reflection;
 [assembly: AssemblyInformationalVersion(CodexUsageSentinel.BuildInfo.Version)]
 
 namespace CodexUsageSentinel {
-    public static class BuildInfo { public const string Version="1.2.0"; }
+    public static class BuildInfo { public const string Version="1.3.0"; }
 }

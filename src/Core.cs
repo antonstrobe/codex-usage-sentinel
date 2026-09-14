@@ -34,6 +34,7 @@ namespace CodexUsageSentinel {
         public string BotUsername = "";
         public string CodexPath = "";
         public string PausedUntilUtc = "";
+        public List<AlarmRule> Alarms = AlarmRule.Defaults();
         public bool Ready { get { return ChatId > 0 && (ConnectionMode=="relay" ? !string.IsNullOrEmpty(RelayTokenProtected) && RelayClient.ValidUrl(RelayUrl) : !string.IsNullOrEmpty(TokenProtected)); } }
         public string RelayToken() {
             try {return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(RelayTokenProtected),null,DataProtectionScope.CurrentUser));}
@@ -124,68 +125,6 @@ namespace CodexUsageSentinel {
             return string.Join("\n", Core.Select(w => w.Label + ": осталось " + w.Remaining.ToString("0.#",CultureInfo.InvariantCulture) + "% · " + w.ResetText)) +
                 "\nДоступные сбросы: " + (Resets.HasValue ? Resets.Value.ToString() : "нет данных") +
                 "\nПроверено: " + CheckedUtc.ToLocalTime().ToString("dd.MM HH:mm:ss");
-        }
-    }
-    public sealed class AlertState {
-        public string AccountId = "";
-        public Dictionary<string, WindowState> Windows = new Dictionary<string, WindowState>();
-    }
-    public sealed class WindowState {
-        public bool Fired10, Fired5, Fired3;
-        public int Pending, Stage;
-        public long Generation;
-    }
-    public sealed class AlertItem {
-        public string Key;
-        public int Stage;
-        public long Generation;
-        public bool Continuous;
-    }
-    // Pure state machine. A skipped threshold escalates directly to the most urgent applicable burst.
-    public sealed class AlertPolicy {
-        public AlertState State;
-        public Usage Current;
-        public AlertPolicy(AlertState state) { State = state ?? new AlertState(); if(State.Windows == null) State.Windows=new Dictionary<string,WindowState>(); }
-        public void Update(Usage usage) {
-            if (usage.AccountId != "" && State.AccountId != "" && usage.AccountId != State.AccountId) State.Windows.Clear();
-            if (usage.AccountId != "") State.AccountId=usage.AccountId;
-            Current=usage;
-            foreach (var key in State.Windows.Keys.Where(k=>!usage.Core.Any(w=>w.Key==k)).ToList()) State.Windows.Remove(key);
-            foreach(var w in usage.Core) {
-                WindowState s;
-                if (!State.Windows.TryGetValue(w.Key,out s)) State.Windows[w.Key]=s=new WindowState();
-                double r=w.Remaining;
-                if(r>10) s.Fired10=false;
-                if(r>5) s.Fired5=false;
-                if(r>3) s.Fired3=false;
-                if (s.Pending>0 && r>s.Stage) { s.Pending=0; s.Generation++; }
-                int stage=r<=2 ? 2 : r<=3 && !s.Fired3 ? 3 : r<=5 && !s.Fired5 ? 5 : r<=10 && !s.Fired10 ? 10 : 0;
-                if (stage>0) {
-                    s.Fired10=true;
-                    if(stage<=5) s.Fired5=true;
-                    if(stage<=3) s.Fired3=true;
-                    if(stage==2) { if(s.Stage!=2 || s.Pending>0) s.Generation++; s.Pending=0; s.Stage=2; }
-                    else { s.Stage=stage; s.Pending=stage==3 ? 50 : 10; s.Generation++; }
-                }
-            }
-        }
-        public AlertItem Next(DateTime now) {
-            if(Current==null || now-Current.CheckedUtc>TimeSpan.FromSeconds(90)) return null;
-            var critical=Current.Core.OrderBy(w=>w.Remaining).FirstOrDefault(w=>w.Remaining<=2);
-            if(critical!=null) { var s=State.Windows[critical.Key]; return new AlertItem { Key=critical.Key, Stage=2, Continuous=true, Generation=s.Generation }; }
-            foreach(var w in Current.Core.OrderBy(w=>w.Remaining)) {
-                var s=State.Windows[w.Key];
-                if(s.Pending>0 && w.Remaining<=s.Stage) return new AlertItem {Key=w.Key,Stage=s.Stage,Generation=s.Generation};
-            }
-            return null;
-        }
-        public bool IsCurrent(AlertItem item, DateTime now) {
-            var next=Next(now);
-            return next!=null && next.Key==item.Key && next.Generation==item.Generation && next.Stage==item.Stage;
-        }
-        public void Acknowledge(AlertItem item) {
-            WindowState s;
-            if(!item.Continuous && State.Windows.TryGetValue(item.Key,out s) && s.Generation==item.Generation && s.Pending>0) s.Pending--;
         }
     }
     public static class CodexClient {

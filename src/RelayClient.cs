@@ -68,7 +68,7 @@ namespace CodexUsageSentinel {
             if(state!="connected" || !id.HasValue || id<=0 || id>9007199254740991 || Math.Floor(id.Value)!=id ||
                 !string.Equals(pair.Username,Json.Str(Json.Get(result,"username")),StringComparison.OrdinalIgnoreCase) || pair.BotUsername!=Json.Str(Json.Get(result,"bot_username")))
                 throw new TelegramFailure("Сервис не подтвердил ваш личный чат.");
-            var settings=new Settings {ConnectionMode="relay",RelayUrl=endpoint.TrimEnd('/'),ChatId=(long)id.Value,Username=pair.Username,BotUsername=pair.BotUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc};
+            var settings=new Settings {ConnectionMode="relay",RelayUrl=endpoint.TrimEnd('/'),ChatId=(long)id.Value,Username=pair.Username,BotUsername=pair.BotUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc,Alarms=AlarmRule.CheckedCopy(old.Alarms??AlarmRule.Defaults())};
             settings.SetRelayToken(pair.Token);return settings;
         }
         public async Task<bool> Send(Settings settings,string text,Func<bool> stillNeeded,CancellationToken ct) {

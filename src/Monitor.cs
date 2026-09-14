@@ -87,7 +87,7 @@ namespace CodexUsageSentinel {
                 }
                 if(id==0) throw new TelegramFailure("Личный чат пока не найден. Напишите боту любое сообщение и повторите подключение, либо укажите свой числовой Chat ID.",30);
             }
-            var settings=new Settings {ChatId=id,Username=username,BotUsername=botUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc};
+            var settings=new Settings {ChatId=id,Username=username,BotUsername=botUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc,Alarms=AlarmRule.CheckedCopy(old.Alarms??AlarmRule.Defaults())};
             settings.SetToken(token);
             return settings;
         }
@@ -127,13 +127,26 @@ namespace CodexUsageSentinel {
         int failures=0;
         bool outagePending=false, outageSent=false;
         long outageVersion=0;
-        public Monitor(Settings settings,AlertState state) {Settings=settings;policy=new AlertPolicy(state);if(settings.Ready)TelegramStatus="Подключён · ожидание порога";}
+        public Monitor(Settings settings,AlertState state) {
+            try{settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());}
+            catch(InvalidOperationException){settings.Alarms=new List<AlarmRule>();Storage.Warning="Настройки будильников повреждены. Откройте «Будильники…» и добавьте правила заново.";}
+            Settings=settings;policy=new AlertPolicy(state,settings.Alarms);if(settings.Ready)TelegramStatus="Подключён · ожидание порога";
+        }
         public void Start() {Task.Run((Func<Task>)PollLoop);Task.Run((Func<Task>)SendLoop);}
         void Notify() {var handler=Changed;if(handler!=null)handler();}
         void Persist() {
             try {Storage.Save("alerts.json",policy.State);StorageStatus="";} catch {StorageStatus="Не удалось сохранить очередь уведомлений. При перезапуске возможны повторы.";}
         }
-        public void SetSettings(Settings settings) {lock(gate){Storage.Save("settings.json",settings);Settings=settings;if(settings.Ready)TelegramStatus="Подключён · ожидание порога";}Notify();}
+        public void SetSettings(Settings settings) {
+            lock(gate){settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());Storage.Save("settings.json",settings);Settings=settings;policy.SetRules(settings.Alarms);Persist();if(settings.Ready)TelegramStatus="Подключён · ожидание порога";}Notify();
+        }
+        public List<AlarmRule> AlarmRules {get{lock(gate)return AlarmRule.CheckedCopy(Settings.Alarms);}}
+        public void SetAlarms(IEnumerable<AlarmRule> rules) {
+            lock(gate) {
+                var next=Json.Read<Settings>(Json.Write(Settings));next.Alarms=AlarmRule.CheckedCopy(rules);
+                SetSettings(next);
+            }
+        }
         public bool Paused {
             get {DateTime until;return DateTime.TryParse(Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind,out until) && until.ToUniversalTime()>DateTime.UtcNow;}
         }
@@ -175,7 +188,8 @@ namespace CodexUsageSentinel {
             return (item.Continuous ? "🚨 КРИТИЧЕСКИЙ ЛИМИТ CODEX" : "⚠️ НИЗКИЙ ЛИМИТ CODEX")+
                 "\n"+w.Label+": осталось "+w.Remaining.ToString("0.#",CultureInfo.InvariantCulture)+"%."+
                 "\nПодготовьте или примените доступный сброс в Codex.\n\n"+usage.Description()+
-                (item.Continuous ? "\n\nПовтор каждые 2 секунды до восстановления лимита или паузы в программе." : "\n\nПорог "+item.Stage+"%. Серия "+(item.Stage==3 ? "50" : "10")+" сообщений; интервал 2 секунды.");
+                "\n\nБудильник: осталось "+item.Stage+"% или меньше.\n"+
+                (item.Continuous ? "Повтор до восстановления лимита, отключения будильника или паузы." : "Серия: "+item.MessageCount+" сообщений.")+" Интервал: "+item.IntervalSeconds+" сек.";
         }
         async Task SendLoop() {
             try {
@@ -186,6 +200,7 @@ namespace CodexUsageSentinel {
                         if(!Paused && settings.Ready && Fresh) {item=policy.Next(DateTime.UtcNow);snapshot=Latest;}
                     }
                     if(!settings.Ready || Paused || (item==null && !outage)) {await Task.Delay(300,cancel.Token);continue;}
+                    if(item!=null && !item.Due(DateTime.UtcNow)) {await Task.Delay(300,cancel.Token);continue;}
                     int retryWait=0;
                     try {
                         bool sent;

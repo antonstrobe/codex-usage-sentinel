@@ -32,6 +32,8 @@ Get-Content -LiteralPath $probe -Encoding UTF8
 | Файл | Назначение |
 | --- | --- |
 | `src/Core.cs` | настройки, DPAPI, пороги, Codex |
+| `src/Alarms.cs` | настраиваемые будильники, интервалы, очередь и миграция старых порогов |
+| `src/AlarmForms.cs` | список будильников и окно редактирования |
 | `src/Monitor.cs` | Telegram и цикл мониторинга |
 | `src/App.cs` | окно, трей, автозагрузка |
 | `src/RelayClient.cs` | привязка через Start и аутентификация устройства |

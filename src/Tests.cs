@@ -43,7 +43,17 @@ namespace CodexUsageSentinel {
         static int Drain(AlertPolicy policy) {int n=0;while(policy.Next(Now)!=null && n<1000){var item=policy.Next(Now);if(item.Continuous)break;policy.Acknowledge(item);n++;}return n;}
         static Settings TestSettings() {var settings=new Settings {ChatId=123,Username="example_user",BotUsername="ExampleOld_bot"};settings.SetToken("123456:"+new string('a',35));return settings;}
         static string Ok(object result) {return Json.Write(new {ok=true,result=result});}
+        static AlarmRule Rule(string id="example-alarm",int percent=30,int count=7,int interval=15,bool continuous=false) {return new AlarmRule {Id=id,Percent=percent,MessageCount=count,IntervalSeconds=interval,Continuous=continuous};}
         [STAThread] public static int Main(string[] args) {
+            if(args.Length==2 && (args[0]=="--render-alarms" || args[0]=="--render-alarm-editor" || args[0]=="--render-main")) {
+                System.Windows.Forms.Application.EnableVisualStyles();
+                using(var monitor=new Monitor(new Settings(),new AlertState()))
+                using(var form=args[0]=="--render-alarms" ? (System.Windows.Forms.Form)new AlarmsForm(monitor) : args[0]=="--render-main" ? (System.Windows.Forms.Form)new MainForm(monitor,false,true,null) : new AlarmEditorForm(Rule(interval:60),true)) {
+                    form.Show();System.Windows.Forms.Application.DoEvents();
+                    using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)) {form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(System.Drawing.Point.Empty,bitmap.Size));bitmap.Save(args[1]);}
+                    form.Close();
+                }return 0;
+            }
             if(args.Length==2 && args[0]=="--render-relay") {
                 System.Windows.Forms.Application.EnableVisualStyles();
                 using(var monitor=new Monitor(new Settings(),new AlertState()))
@@ -56,6 +66,60 @@ namespace CodexUsageSentinel {
                 }
                 return 0;
             }
+            Test("old settings migrate to four default alarms and empty list stays empty",()=>{
+                Check(Json.Read<Settings>("{\"Version\":1}").Alarms.Count==4,"defaults");
+                var settings=Json.Read<Settings>("{\"Alarms\":[]}");var p=new AlertPolicy(new AlertState(),settings.Alarms);p.Update(UsageAt(0));Check(p.Next(Now)==null,"explicit empty");
+            });
+            Test("custom threshold and exact message count",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule()});p.Update(UsageAt(31));Check(p.Next(Now)==null,"above threshold");p.Update(UsageAt(30));Check(Drain(p)==7,"custom count");p.Update(UsageAt(29));Check(p.Next(Now)==null,"once per crossing");
+            });
+            Test("message interval persists across restart",()=>{
+                var rules=new[]{Rule(interval:120)};var p=new AlertPolicy(new AlertState(),rules);p.Update(UsageAt(30));var item=p.Next(Now);Check(item.Due(Now),"first immediate");p.Acknowledge(item,Now);
+                var resumed=new AlertPolicy(Json.Read<AlertState>(Json.Write(p.State)),rules);var usage=UsageAt(29);usage.CheckedUtc=Now.AddSeconds(60);resumed.Update(usage);
+                Check(!resumed.Next(Now.AddSeconds(119)).Due(Now.AddSeconds(119)),"no early send");Check(resumed.Next(Now.AddSeconds(120)).Due(Now.AddSeconds(120)),"due after interval");
+            });
+            Test("delete or disable cancels an item already waiting to send",()=>{
+                var rules=new[]{Rule()};var p=new AlertPolicy(new AlertState(),rules);p.Update(UsageAt(20));var item=p.Next(Now);
+                var disabled=AlarmRule.CheckedCopy(rules);disabled[0].Enabled=false;p.SetRules(disabled);Check(!p.IsCurrent(item,Now) && p.Next(Now)==null,"disabled immediately");
+                p.SetRules(rules);Check(Drain(p)==7,"reenabled");p.Update(UsageAt(90));p.Update(UsageAt(20));item=p.Next(Now);p.SetRules(new AlarmRule[0]);Check(!p.IsCurrent(item,Now) && p.Next(Now)==null,"deleted immediately");
+            });
+            Test("editing interval or count starts new revision without accepting old ack",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule()});p.Update(UsageAt(20));var old=p.Next(Now);p.SetRules(new[]{Rule(count:4,interval:30)});p.Acknowledge(old,Now);
+                Check(!p.IsCurrent(old,Now) && p.Next(Now).IntervalSeconds==30 && Drain(p)==4,"new configuration");
+            });
+            Test("unrelated alarm edit preserves completed series",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule("first",30,7),Rule("second",10,5)});p.Update(UsageAt(25));Check(Drain(p)==7,"first sent");
+                p.SetRules(new[]{Rule("first",30,7),Rule("second",8,2)});Check(p.Next(Now)==null,"first not repeated");p.Update(UsageAt(8));Check(Drain(p)==2,"edited second");
+            });
+            Test("custom escalation cancels a higher series even during its interval",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule("first",40,100,3600),Rule("second",25,3,2)});p.Update(UsageAt(40));var item=p.Next(Now);p.Acknowledge(item,Now);p.Update(UsageAt(25));
+                Check(!p.IsCurrent(item,Now) && p.Next(Now).Due(Now) && Drain(p)==3,"urgent series immediate");
+            });
+            Test("custom continuous rule has its own interval and stops on recovery",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule(percent:12,interval:60,continuous:true)});p.Update(UsageAt(12));var a=p.Next(Now);Check(a.Continuous,"continuous");p.Acknowledge(a,Now);
+                Check(!p.Next(Now).Due(Now.AddSeconds(59)) && p.Next(Now).Due(Now.AddSeconds(60)),"own interval");p.Update(UsageAt(13));Check(p.Next(Now)==null,"recovered");p.Update(UsageAt(12));Check(p.Next(Now).Due(Now),"rearmed immediately");
+            });
+            Test("same threshold supports separate alarms",()=>{
+                var p=new AlertPolicy(new AlertState(),new[]{Rule("first",20,3),Rule("second",20,4)});p.Update(UsageAt(20));Check(Drain(p)==7,"both rules");
+            });
+            Test("legacy pending series and fired thresholds migrate without duplication",()=>{
+                var usage=UsageAt(3);var state=new AlertState();state.Windows[usage.Core[0].Key]=new WindowState {Fired10=true,Fired5=true,Fired3=true,Stage=3,Pending=43,Generation=4};
+                var p=new AlertPolicy(state);p.Update(usage);Check(state.Version==2 && Drain(p)==43,"remaining series");p.Update(UsageAt(4));Check(p.Next(Now)==null,"old 5 percent already fired");
+            });
+            Test("alarm validation rejects invalid ranges and duplicate ids",()=>{
+                foreach(var bad in new[]{Rule(percent:-1),Rule(percent:101),Rule(count:0),Rule(count:10001),Rule(interval:1),Rule(interval:86401)})Throws(()=>AlarmRule.CheckedCopy(new[]{bad}));
+                Throws(()=>AlarmRule.CheckedCopy(new[]{Rule(),Rule()}));Check(AlarmRule.CheckedCopy(new[]{Rule(percent:0,interval:86400)}).Count==1,"boundary values valid");
+            });
+            Test("alarm settings save atomically and retain other settings",()=>{
+                string previousRoot=Storage.Root;string folder=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"sentinel-alarm-test-"+Guid.NewGuid().ToString("N"));Storage.Root=folder;
+                try {
+                    var settings=TestSettings();settings.CodexPath="example-codex.exe";
+                    using(var monitor=new Monitor(settings,new AlertState())) {
+                        monitor.SetAlarms(new[]{Rule()});var saved=Storage.Load<Settings>("settings.json");Check(saved.Alarms.Count==1 && saved.Alarms[0].MessageCount==7 && saved.Token()==settings.Token() && saved.CodexPath==settings.CodexPath,"saved and preserved");
+                        var snapshot=monitor.Settings;Storage.Root=System.IO.Path.Combine(folder,"settings.json");Throws(()=>monitor.SetAlarms(new AlarmRule[0]));Check(monitor.Settings==snapshot && monitor.AlarmRules.Count==1,"failure does not change active alarms");
+                    }
+                } finally {Storage.Root=previousRoot;foreach(string name in new[]{"settings.json","settings.json.new","alerts.json","alerts.json.new"}){string file=System.IO.Path.Combine(folder,name);if(System.IO.File.Exists(file))System.IO.File.Delete(file);}if(System.IO.Directory.Exists(folder))System.IO.Directory.Delete(folder);}
+            });
             Test("relay URLs require HTTPS without embedded credentials",()=>{
                 Check(RelayClient.ValidUrl("https://example.com/relay"),"https");
                 foreach(var url in new[]{"http://example.com","https://user:password@example.com","https://example.com/?token=x","https://example.com/#x"})Check(!RelayClient.ValidUrl(url),"reject unsafe url");
@@ -70,7 +134,7 @@ namespace CodexUsageSentinel {
                 }
             });
             Test("Start waits then stores independent DPAPI device credentials",()=>{
-                var old=TestSettings();old.CodexPath="example-codex.exe";
+                var old=TestSettings();old.CodexPath="example-codex.exe";old.Alarms=new List<AlarmRule>{Rule()};
                 var pair=new Pairing {Id=new string('a',32),Token=RelayClient.NewToken(),Username="user_two",BotUsername="Example_bot"};
                 var fake=new RelayTransport {Reply=n=>n==1 ? RelayTransport.Result(new {state="waiting"}) : RelayTransport.Result(new {state="connected",chat_id=222,username="user_two",bot_username="Example_bot"})};
                 using(var relay=new RelayClient(fake)) {
@@ -78,6 +142,7 @@ namespace CodexUsageSentinel {
                     var result=relay.Finish("https://example.com",pair,old,CancellationToken.None).GetAwaiter().GetResult();
                     Check(result.Ready && result.ConnectionMode=="relay" && result.ChatId==222 && result.TokenProtected=="" && result.RelayToken()==pair.Token,"independent connection");
                     Check(result.CodexPath==old.CodexPath && old.ChatId==123 && old.ConnectionMode=="direct","old preserved");
+                    Check(result.Alarms.Count==1 && result.Alarms[0].Id==old.Alarms[0].Id && result.Alarms[0].IntervalSeconds==15,"alarms preserved on relay connection");
                     Check(!Json.Write(result).Contains(pair.Token) && fake.HadAuth,"encrypted and authenticated");
                 }
             });
@@ -191,13 +256,14 @@ namespace CodexUsageSentinel {
                 using(var bot=new Telegram(fake)){Throws(()=>bot.Connect(previous,"","",CancellationToken.None).GetAwaiter().GetResult());Check(!fake.Methods.Contains("getUpdates") && !fake.Methods.Contains("deleteWebhook"),"preserved");}
             });
             Test("new bot reuses saved private id without polling",()=>{
-                var previous=TestSettings();previous.BotUsername="ExampleOld_bot";previous.CodexPath="saved-cli.exe";previous.PausedUntilUtc=Now.AddMinutes(10).ToString("o");
+                var previous=TestSettings();previous.BotUsername="ExampleOld_bot";previous.CodexPath="saved-cli.exe";previous.PausedUntilUtc=Now.AddMinutes(10).ToString("o");previous.Alarms=new List<AlarmRule>{Rule()};
                 string replacement="123456:"+new string('b',35);
                 var fake=new FakeTransport {Reply=m=>m=="getMe" ? Ok(new {username="ExampleNotify_bot",is_bot=true}) : Ok(new {id=123,type="private",username="example_user"})};
                 using(var bot=new Telegram(fake)) {
                     var s=bot.Connect(previous,replacement,"",CancellationToken.None).GetAwaiter().GetResult();
                     Check(s.ChatId==123 && s.BotUsername=="ExampleNotify_bot" && s.Token()==replacement,"new bot connected");
                     Check(s.CodexPath==previous.CodexPath && s.PausedUntilUtc==previous.PausedUntilUtc,"preferences preserved");
+                    Check(s.Alarms.Count==1 && s.Alarms[0].Id==previous.Alarms[0].Id && s.Alarms[0].MessageCount==7,"alarms preserved on direct connection");
                     Check(fake.Methods.SequenceEqual(new [] {"getMe","getChat"}),"no competing update consumer");
                     Check(previous.BotUsername=="ExampleOld_bot" && previous.Token()!=replacement,"old settings untouched");
                 }

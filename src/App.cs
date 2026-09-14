@@ -148,8 +148,10 @@ namespace CodexUsageSentinel {
             subline=Theme.Label("Остаток основного лимита",11,Theme.Muted);subline.Location=new Point(25,93);card.Controls.Add(subline);
             windows=new Label {AutoSize=false,Location=new Point(25,129),Size=new Size(674,64),Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right,Font=new Font("Segoe UI",10),ForeColor=Theme.Text};card.Controls.Add(windows);root.Controls.Add(card,0,1);
             health=new Label {Dock=DockStyle.Fill,ForeColor=Theme.Muted,Padding=new Padding(0,0,0,3)};root.Controls.Add(health,0,2);
-            policy=new Label {Dock=DockStyle.Fill,BackColor=Theme.Panel,Padding=new Padding(14),ForeColor=Theme.Text,
-                Text="10% → 10 сообщений     5% → 10 сообщений     3% → 50 сообщений\n2% и ниже → повтор до восстановления лимита или ручной паузы\nИнтервал сообщений: 2 секунды · Проверка Codex: 60 секунд"};root.Controls.Add(policy,0,3);
+            var alarmPanel=new Panel {Dock=DockStyle.Fill,BackColor=Theme.Panel,Padding=new Padding(14)};
+            var alarms=Theme.Button("Будильники…",()=>OpenAlarms());alarms.AutoSize=false;alarms.Width=158;alarms.Dock=DockStyle.Right;alarmPanel.Controls.Add(alarms);
+            policy=new Label {Dock=DockStyle.Fill,ForeColor=Theme.Text};alarmPanel.Controls.Add(policy);policy.BringToFront();root.Controls.Add(alarmPanel,0,3);
+            Theme.Describe(alarms,tips,"Открыть будильники: добавить, изменить или удалить событие по проценту; выбрать количество сообщений и интервал между ними.");
             var bottom=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,Padding=new Padding(0,12,0,0)};
             telegram=new Label {Size=new Size(714,45),ForeColor=Theme.Text};bottom.Controls.Add(telegram);
             detail=new Label {Size=new Size(714,57),ForeColor=Theme.Muted,Font=new Font("Segoe UI",9)};bottom.Controls.Add(detail);root.Controls.Add(bottom,0,4);
@@ -173,6 +175,7 @@ namespace CodexUsageSentinel {
             var menu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
             menu.Items.Add("Открыть",null,(s,e)=>Reveal());menu.Items.Add("Проверить лимиты",null,(s,e)=>monitor.CheckNow());
             menu.Items.Add("Настроить Telegram…",null,(s,e)=>{Reveal();Setup();});
+            menu.Items.Add("Будильники…",null,(s,e)=>{Reveal();OpenAlarms();});
             menu.Items.Add("Папка автозагрузки",null,(s,e)=>OpenStartupFolder());
             menu.Items.Add("Отправить 1 тестовое сообщение",null,(s,e)=>Test(1));
             trayPause=new ToolStripMenuItem("Пауза уведомлений выключена");
@@ -192,6 +195,7 @@ namespace CodexUsageSentinel {
         void Reveal() {Show();WindowState=FormWindowState.Normal;Activate();}
         void Quit() {quitting=true;Close();}
         void Setup() {using(var f=new RelaySetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
+        void OpenAlarms() {using(var f=new AlarmsForm(monitor))f.ShowDialog(this);RefreshStatus();}
         async void Test(int total=10) {
             if(testing)return;
             testing=true;test.Enabled=false;RefreshStatus();
@@ -210,7 +214,10 @@ namespace CodexUsageSentinel {
             var usage=monitor.Latest;
             bool fresh=monitor.Fresh && usage!=null && DateTime.UtcNow-usage.CheckedUtc<=TimeSpan.FromSeconds(90);
             remaining.Text=fresh ? usage.Remaining.ToString("0.#",CultureInfo.InvariantCulture)+"%" : "—";
-            remaining.ForeColor=fresh && usage.Remaining<=10 ? Theme.Red : Theme.Green;
+            var alarmRules=monitor.AlarmRules;var enabledRules=alarmRules.Where(r=>r.Enabled).OrderByDescending(r=>r.Percent).ToList();
+            remaining.ForeColor=fresh && enabledRules.Any(r=>usage.Remaining<=r.Percent) ? Theme.Red : Theme.Green;
+            policy.Text="Активных будильников: "+enabledRules.Count+" из "+alarmRules.Count+"\n"+
+                (enabledRules.Count==0 ? "Уведомления по процентам выключены" : string.Join("   ·   ",enabledRules.Take(3).Select(r=>"≤"+r.Percent+"%: "+(r.Continuous ? "∞" : r.MessageCount.ToString())))+(enabledRules.Count>3 ? "   …" : ""))+"\nПроверка лимитов каждые 60 секунд";
             subline.Text=fresh ? "Осталось · минимум среди основных окон Codex" : "Нет свежих данных о лимитах";
             windows.Text=usage==null ? "Ожидаю ответ Codex…" : string.Join("\n",usage.Core.Select(w=>w.Label+": "+w.Remaining.ToString("0.#")+"% · "+w.ResetText));
             if(!fresh && usage!=null)windows.Text="Последние известные значения:\n"+windows.Text;

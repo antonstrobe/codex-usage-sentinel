@@ -12,7 +12,7 @@ namespace CodexUsageSentinel {
     public static class Compiler {
         public static async Task<BuildResult> Build(string project) {
             project=Path.GetFullPath(project);
-            string[] files={"Version.cs","Core.cs","Monitor.cs","RelayClient.cs","RelaySetupForm.cs","App.cs"};
+            string[] files={"Version.cs","Core.cs","Alarms.cs","AlarmForms.cs","Monitor.cs","RelayClient.cs","RelaySetupForm.cs","App.cs"};
             if(files.Any(f=>!File.Exists(Path.Combine(project,"src",f))) || !File.Exists(Path.Combine(project,"src","app.manifest")))
                 throw new InvalidOperationException("Выберите корневую папку исходников: рядом должны находиться папка src и файл build.ps1.");
             string compiler=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),"Microsoft.NET","Framework64","v4.0.30319","csc.exe");
