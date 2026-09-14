@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build portable executables
+      - name: Build local executable for checks
         shell: powershell
         run: .\build.ps1
       - name: Run offline tests
@@ -31,11 +31,3 @@ jobs:
           Start-MpScan -ScanType CustomScan -ScanPath (Join-Path $PWD 'dist')
           $threats = @(Get-MpThreatDetection | Where-Object { ($_.Resources -join ' ') -like ('*' + $PWD.Path + '*') })
           if ($threats.Count -gt 0) { throw 'Defender detected a threat in release files.' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CodexUsageSentinel-Windows
-          if-no-files-found: error
-          path: |
-            dist/CodexUsageSentinel.exe
-            dist/Build.exe
-            dist/SHA256SUMS.txt

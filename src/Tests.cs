@@ -244,7 +244,6 @@ namespace CodexUsageSentinel {
             Test("recipient must match username",()=>Throws(()=>Telegram.PrivateRecipient(Json.Read<object>("{\"id\":123,\"type\":\"private\",\"username\":\"elsewhere\"}"),"example_user")));
             Test("verified private recipient accepted",()=>Check(Telegram.PrivateRecipient(Json.Read<object>("{\"id\":123,\"type\":\"private\",\"username\":\"Example_User\"}"),"example_user")==123,"private"));
             Test("Telegram retry_after honored",()=>Check(Telegram.RetryDelay(Json.Read<object>("{\"parameters\":{\"retry_after\":37}}"))==38,"retry"));
-            Test("autostart command quotes executable",()=>Check(Startup.Command.StartsWith("\"") && Startup.Command.EndsWith("\" --tray"),"command"));
             Test("safe lookup does not acknowledge audit updates",()=>{
                 var fake=new FakeTransport {Reply=method=>method=="getMe" ? Ok(new {username="ExampleNotify_bot",is_bot=true}) : method=="getWebhookInfo" ? Ok(new {url=""}) : Ok(new [] {new {message=new {chat=new {id=123,type="private",username="example_user"},from=new {id=123}}}})};
                 var previous=TestSettings();previous.ChatId=0;

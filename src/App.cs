@@ -9,31 +9,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace CodexUsageSentinel {
-    public static class Startup {
-        const string KeyPath=@"Software\Microsoft\Windows\CurrentVersion\Run";
-        const string ValueName="CodexUsageSentinel";
-        public static string Command {get{return "\""+Application.ExecutablePath+"\" --tray";}}
-        public static string Folder {get{return Environment.GetFolderPath(Environment.SpecialFolder.Startup);}}
-        public static void OpenFolder() {
-            Directory.CreateDirectory(Folder);
-            Process.Start(new ProcessStartInfo("explorer.exe","\""+Folder+"\"") {UseShellExecute=true});
-        }
-        public static bool Enabled {
-            get {using(var key=Registry.CurrentUser.OpenSubKey(KeyPath)) return key!=null && string.Equals(key.GetValue(ValueName) as string,Command,StringComparison.OrdinalIgnoreCase);}
-        }
-        public static void Toggle() {
-            bool enabled=Enabled;
-            using(var key=Registry.CurrentUser.CreateSubKey(KeyPath)) {
-                if(enabled)key.DeleteValue(ValueName,false);else key.SetValue(ValueName,Command,RegistryValueKind.String);
-            }
-        }
-        public static bool InStartupFolder {
-            get {return string.Equals(Path.GetDirectoryName(Application.ExecutablePath),Environment.GetFolderPath(Environment.SpecialFolder.Startup),StringComparison.OrdinalIgnoreCase);}
-        }
-    }
     public static class Theme {
         public static Color Bg=Color.FromArgb(15,19,28),Panel=Color.FromArgb(23,30,43),Text=Color.FromArgb(236,241,248),Muted=Color.FromArgb(153,169,192),Green=Color.FromArgb(89,219,173),Red=Color.FromArgb(255,119,137);
         public static Color ButtonBg=Color.FromArgb(37,48,67),ActionBlue=Color.FromArgb(119,176,255);
@@ -130,7 +107,7 @@ namespace CodexUsageSentinel {
         readonly ToolTip tips=Theme.Tooltips();
         readonly ToolStripMenuItem trayPause;
         Label remaining,subline,windows,health,telegram,detail,policy;
-        Button startup,pause,test,telegramSetup;
+        Button pause,test,telegramSetup;
         bool quitting,testing;
         public MainForm(Monitor monitor,bool trayStart,bool renderOnly,EventWaitHandle showEvent) {
             this.monitor=monitor;this.renderOnly=renderOnly;this.showEvent=showEvent;
@@ -166,17 +143,13 @@ namespace CodexUsageSentinel {
             Theme.Describe(codex,tips,"Выбрать установленный codex.exe, через который программа читает лимиты.");
             var hide=Theme.Button("В трей",()=>Hide());buttons.Controls.Add(hide);buttons.SetFlowBreak(hide,true);
             Theme.Describe(hide,tips,"Свернуть окно в трей. Программа продолжит проверять лимиты и отправлять уведомления.");
-            startup=Theme.Button("Автозапуск",()=>ToggleStartup());buttons.Controls.Add(startup);
             pause=Theme.Button("Пауза на 30 мин",()=>{try{monitor.Pause();RefreshStatus();}catch{ShowError("Не удалось сохранить паузу.");}});buttons.Controls.Add(pause);
-            var startupFolder=Theme.Button("Папка автозагрузки",()=>OpenStartupFolder());buttons.Controls.Add(startupFolder);
-            Theme.Describe(startupFolder,tips,"Открыть папку автозагрузки Windows. Можно положить туда EXE или ярлык, а затем удалить его из этой папки. Это разовое действие.");
             root.Controls.Add(buttons,0,5);
             tray=new NotifyIcon {Icon=Icon,Text="Codex Usage Sentinel",Visible=!renderOnly};
             var menu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
             menu.Items.Add("Открыть",null,(s,e)=>Reveal());menu.Items.Add("Проверить лимиты",null,(s,e)=>monitor.CheckNow());
             menu.Items.Add("Настроить Telegram…",null,(s,e)=>{Reveal();Setup();});
             menu.Items.Add("Будильники…",null,(s,e)=>{Reveal();OpenAlarms();});
-            menu.Items.Add("Папка автозагрузки",null,(s,e)=>OpenStartupFolder());
             menu.Items.Add("Отправить 1 тестовое сообщение",null,(s,e)=>Test(1));
             trayPause=new ToolStripMenuItem("Пауза уведомлений выключена");
             trayPause.Click+=(s,e)=>{try{monitor.Pause();RefreshStatus();}catch{ShowError("Не удалось сохранить паузу.");}};menu.Items.Add(trayPause);
@@ -191,7 +164,6 @@ namespace CodexUsageSentinel {
         }
         void ShowError(string message) {MessageBox.Show(this,message,"Codex Usage Sentinel",MessageBoxButtons.OK,MessageBoxIcon.Information);}
         public void StartMonitoring() {if(renderOnly)return;var handle=Handle;monitor.Start();clock.Start();activation.Start();}
-        void OpenStartupFolder() {try{Startup.OpenFolder();}catch{ShowError("Не удалось открыть папку. Нажмите Win+R, введите shell:startup и нажмите Enter.");}}
         void Reveal() {Show();WindowState=FormWindowState.Normal;Activate();}
         void Quit() {quitting=true;Close();}
         void Setup() {using(var f=new RelaySetupForm(monitor))f.ShowDialog(this);RefreshStatus();}
@@ -204,7 +176,6 @@ namespace CodexUsageSentinel {
             catch(Exception ex){if(!IsDisposed)ShowError(ex is TelegramFailure || ex is DeliveryUncertain || ex is InvalidOperationException ? ex.Message : "Не удалось отправить тестовое сообщение.");}
             finally{testing=false;if(!IsDisposed){test.Enabled=monitor.Settings.Ready;RefreshStatus();}}
         }
-        void ToggleStartup() {if(Startup.InStartupFolder){ShowError("EXE уже находится в папке автозагрузки. Для отключения переместите его в другую папку; там будет доступна кнопка включения и выключения автозапуска.");return;}try{Startup.Toggle();RefreshStatus();}catch{ShowError("Не удалось изменить автозапуск. Можно положить EXE или ярлык в папку shell:startup.");}}
         void ChooseCodex() {
             using(var dialog=new OpenFileDialog {Title="Выберите codex.exe",Filter="Codex CLI|codex.exe"}) {
                 if(dialog.ShowDialog(this)==DialogResult.OK) {monitor.Settings.CodexPath=dialog.FileName;try{monitor.SetSettings(monitor.Settings);monitor.CheckNow();}catch{ShowError("Не удалось сохранить путь Codex.");}}
@@ -228,13 +199,8 @@ namespace CodexUsageSentinel {
             health.ForeColor=fresh ? Theme.Muted : Theme.Red;
             telegram.Text=monitor.Settings.Ready ? "Telegram  @"+monitor.Settings.BotUsername+" → "+(monitor.Settings.Username=="" ? "личный чат "+monitor.Settings.ChatId : "@"+monitor.Settings.Username)+"\n"+monitor.TelegramStatus : "Telegram не подключён · нажмите «Telegram…»\nПолучатель: ваш личный чат";
             string extra=usage!=null ? string.Join("; ",usage.Windows.Where(w=>!w.Core).Select(w=>w.Label+" "+w.Remaining.ToString("0.#")+"%")) : "";
-            detail.Text=(monitor.Paused ? "Уведомления на паузе до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm") : "Закрытие окна сворачивает программу в трей. Выход — через меню значка.")+
+            detail.Text=(monitor.Paused ? "Уведомления на паузе до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm") : "Ручной запуск · после перезагрузки запустите снова. Закрытие окна — в трей.")+
                 "\n"+(monitor.StorageStatus!="" ? monitor.StorageStatus : Storage.Warning!="" ? Storage.Warning : "Другие лимиты (справочно): "+(extra=="" ? "нет данных" : extra));
-            try{
-                bool fromFolder=Startup.InStartupFolder,enabled=Startup.Enabled||fromFolder;
-                string hint=enabled ? "Сейчас: автозапуск включён. Программа запускается при входе в Windows.\n"+(fromFolder ? "EXE находится в папке автозагрузки. Чтобы отключить автозапуск, переместите его в другую папку." : "Нажмите, чтобы отключить автозапуск.") : "Сейчас: автозапуск выключен. Программа не добавлена в автозапуск.\nНажмите, чтобы включить запуск при входе в Windows.";
-                Theme.ToggleState(startup,tips,enabled,enabled ? "Автозапуск включён" : "Автозапуск выключен",hint);
-            }catch{Theme.ToggleState(startup,tips,false,"Автозапуск: статус неизвестен","Не удалось проверить настройку автозапуска Windows.");}
             bool paused=monitor.Paused;
             string pauseState=paused ? "Пауза уведомлений включена" : "Пауза уведомлений выключена";
             string pauseHint=paused ? "Сейчас: пауза включена. Автоматические уведомления приостановлены до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm")+". Проверка лимитов продолжается.\nНажмите, чтобы возобновить уведомления." : "Сейчас: пауза выключена. Автоматические уведомления разрешены.\nНажмите, чтобы приостановить их на 30 минут. Проверка лимитов продолжится.";
@@ -271,7 +237,7 @@ namespace CodexUsageSentinel {
             bool created;
             using(var mutex=new Mutex(true,@"Local\CodexUsageSentinel.SingleInstance",out created))
             using(var show=new EventWaitHandle(false,EventResetMode.AutoReset,@"Local\CodexUsageSentinel.Show")) {
-                if(!created){if(!args.Contains("--tray") && (!Startup.InStartupFolder || args.Contains("--show")))show.Set();return 0;}
+                if(!created){if(!args.Contains("--tray"))show.Set();return 0;}
                 try {
                     var settings=Storage.Load<Settings>("settings.json");
                     using(var monitor=new Monitor(settings,Storage.Load<AlertState>("alerts.json")))
