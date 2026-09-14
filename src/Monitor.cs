@@ -14,9 +14,11 @@ namespace CodexUsageSentinel {
     public sealed class TelegramFailure : Exception {
         public int RetrySeconds;
         public bool RateLimited;
+        public int ErrorCode;
+        public bool MessageMissing;
         public TelegramFailure(string message,int retry=10) : base(message) { RetrySeconds=retry; }
     }
-    public sealed class Telegram : IDisposable {
+    public sealed partial class Telegram : IDisposable {
         readonly HttpClient http;
         readonly RelayClient relay;
         readonly SemaphoreSlim sendGate = new SemaphoreSlim(1,1);
@@ -35,12 +37,16 @@ namespace CodexUsageSentinel {
                     try {data=Json.Read<object>(await response.Content.ReadAsStringAsync());} catch {throw new TelegramFailure("Telegram вернул нечитаемый ответ.");}
                     if(Json.Get(data,"ok") is bool && (bool)Json.Get(data,"ok")) return Json.Get(data,"result");
                     int code=(int)(Json.Number(Json.Get(data,"error_code"))??(int)response.StatusCode);
-                    if(code==429) throw new TelegramFailure("Telegram просит снизить частоту. Ожидание перед повтором.",RetryDelay(data));
-                    if(code==409) throw new TelegramFailure("Бот уже получает сообщения в другой программе. Укажите Chat ID вручную.",60);
-                    if(code==401) throw new TelegramFailure("Telegram отклонил токен. Обновите его в настройках.",60);
-                    if(code==403) throw new TelegramFailure("Бот не может отправить в выбранный чат. Для личного чата нажмите Start; для группы проверьте участие и право отправки. Другой получатель не используется.",60);
-                    if(code==400 && (method=="getChat" || method=="sendMessage")) throw new TelegramFailure("Выбранный чат недоступен. Для личного чата нажмите Start; для группы проверьте ID и права бота. Другой получатель не используется.",60);
-                    throw new TelegramFailure("Ошибка Telegram ("+code+"). Проверьте токен и выбранный Chat ID.",15);
+                    string description=Json.Str(Json.Get(data,"description")).ToLowerInvariant();
+                    if(code==400 && method=="editMessageText" && description.Contains("message is not modified"))return new Dictionary<string,object>{{"unchanged",true}};
+                    if(code==400 && method=="deleteMessage" && description.Contains("message to delete not found"))return true;
+                    if(code==400 && method=="editMessageText" && description.Contains("message to edit not found"))throw new TelegramFailure("Тихое сообщение удалено; создам новое без звука.",2){ErrorCode=code,MessageMissing=true};
+                    if(code==429) throw new TelegramFailure("Telegram просит снизить частоту. Ожидание перед повтором.",RetryDelay(data)){ErrorCode=code,RateLimited=true};
+                    if(code==409) throw new TelegramFailure("Бот уже получает сообщения в другой программе. Укажите Chat ID вручную.",60){ErrorCode=code};
+                    if(code==401) throw new TelegramFailure("Telegram отклонил токен. Обновите его в настройках.",60){ErrorCode=code};
+                    if(code==403) throw new TelegramFailure("Бот не может отправить в выбранный чат. Для личного чата нажмите Start; для группы проверьте участие и право отправки. Другой получатель не используется.",60){ErrorCode=code};
+                    if(code==400 && (method=="getChat" || method=="sendMessage")) throw new TelegramFailure("Выбранный чат недоступен. Для личного чата нажмите Start; для группы проверьте ID и права бота. Другой получатель не используется.",60){ErrorCode=code};
+                    throw new TelegramFailure("Ошибка Telegram ("+code+"). Проверьте токен и выбранный Chat ID.",15){ErrorCode=code};
                 }
             } catch(OperationCanceledException) {ct.ThrowIfCancellationRequested(); throw new TelegramFailure("Telegram не ответил за 15 секунд.");}
             catch(HttpRequestException) {throw new TelegramFailure("Нет соединения с Telegram. Проверьте интернет.");}
@@ -87,7 +93,7 @@ namespace CodexUsageSentinel {
                 }
                 if(id==0) throw new TelegramFailure("Личный чат пока не найден. Напишите боту любое сообщение и повторите подключение, либо укажите свой числовой Chat ID.",30);
             }
-            var settings=new Settings {ChatId=id,Username=username,BotUsername=botUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc,Alarms=AlarmRule.CheckedCopy(old.Alarms??AlarmRule.Defaults())};
+            var settings=new Settings {ChatId=id,Username=username,BotUsername=botUsername,CodexPath=old.CodexPath,PausedUntilUtc=old.PausedUntilUtc,LiveStatusEnabled=old.LiveStatusEnabled,Alarms=AlarmRule.CheckedCopy(old.Alarms??AlarmRule.Defaults())};
             if(old.ConnectionMode=="direct" && !string.IsNullOrEmpty(old.TokenProtected) && token==old.Token()) {
                 settings.GroupChatId=old.GroupChatId;settings.GroupTitle=old.GroupTitle;settings.RecipientMode=old.RecipientMode;
             }
@@ -114,15 +120,17 @@ namespace CodexUsageSentinel {
         }
         public void Dispose() {http.Dispose();relay.Dispose();}
     }
-    public sealed class Monitor : IDisposable {
+    public sealed partial class Monitor : IDisposable {
         readonly object gate=new object();
         readonly CancellationTokenSource cancel=new CancellationTokenSource();
         readonly SemaphoreSlim checkSignal=new SemaphoreSlim(0,1);
         readonly AlertPolicy policy;
+        readonly StatusPublisher liveStatus=new StatusPublisher(Storage.Load<StatusMessageState>("status-messages.json"),s=>Storage.Save("status-messages.json",s));
         public readonly Telegram Bot=new Telegram();
         public Settings Settings;
         public Usage Latest;
         public string ReadStatus="Ожидание первой проверки", TelegramStatus="Telegram ещё не подключён", StorageStatus="";
+        public string LiveStatusText="Тихий статус выключен";
         public DateTime LastAttemptUtc, NextCheckUtc;
         public bool Fresh;
         public int SentCount;
@@ -130,19 +138,22 @@ namespace CodexUsageSentinel {
         int failures=0;
         bool outagePending=false, outageSent=false;
         long outageVersion=0;
+        int statusRevision=0,recreateStatus=0,statusBottomVersion=0,statusBottomHandled=0;
         public Monitor(Settings settings,AlertState state) {
             try{settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());}
             catch(InvalidOperationException){settings.Alarms=new List<AlarmRule>();Storage.Warning="Настройки будильников повреждены. Откройте «Будильники…» и добавьте правила заново.";}
             Settings=settings;policy=new AlertPolicy(state,settings.Alarms);if(settings.Ready)TelegramStatus="Подключён · ожидание порога";
         }
-        public void Start() {Task.Run((Func<Task>)PollLoop);Task.Run((Func<Task>)SendLoop);}
+        public void Start() {Task.Run((Func<Task>)PollLoop);Task.Run((Func<Task>)SendLoop);Task.Run((Func<Task>)StatusLoop);}
         void Notify() {var handler=Changed;if(handler!=null)handler();}
         void Persist() {
             try {Storage.Save("alerts.json",policy.State);StorageStatus="";} catch {StorageStatus="Не удалось сохранить очередь уведомлений. При перезапуске возможны повторы.";}
         }
         public void SetSettings(Settings settings) {
-            lock(gate){settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());Storage.Save("settings.json",settings);Settings=settings;policy.SetRules(settings.Alarms);Persist();if(settings.Ready)TelegramStatus="Подключён · ожидание порога";}Notify();
+            lock(gate){settings.Alarms=AlarmRule.CheckedCopy(settings.Alarms??AlarmRule.Defaults());Storage.Save("settings.json",settings);Settings=settings;policy.SetRules(settings.Alarms);Persist();if(settings.Ready)TelegramStatus="Подключён · ожидание порога";Interlocked.Increment(ref statusRevision);}Notify();
         }
+        public void ToggleLiveStatus(){lock(gate){var next=Json.Read<Settings>(Json.Write(Settings));next.LiveStatusEnabled=!next.LiveStatusEnabled;SetSettings(next);}}
+        public void RecreateLiveStatus(){Interlocked.Exchange(ref recreateStatus,1);Interlocked.Increment(ref statusRevision);}
         public void SelectRecipient(string mode) {
             lock(gate) {
                 if(mode!="private" && mode!="group")throw new InvalidOperationException("Выберите личный чат или группу.");
@@ -162,7 +173,7 @@ namespace CodexUsageSentinel {
             get {DateTime until;return DateTime.TryParse(Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind,out until) && until.ToUniversalTime()>DateTime.UtcNow;}
         }
         public void Pause() {
-            lock(gate) {Settings.PausedUntilUtc=Paused ? "" : DateTime.UtcNow.AddMinutes(30).ToString("o");Storage.Save("settings.json",Settings);} Notify();
+            lock(gate) {Settings.PausedUntilUtc=Paused ? "" : DateTime.UtcNow.AddMinutes(30).ToString("o");Storage.Save("settings.json",Settings);Interlocked.Increment(ref statusRevision);} Notify();
         }
         public void CheckNow() {if(checkSignal.CurrentCount==0)try{checkSignal.Release();}catch(SemaphoreFullException){}}
         public async Task PollOnce() {
@@ -181,7 +192,7 @@ namespace CodexUsageSentinel {
                     if(failures>=3 && !outageSent) {outagePending=true;outageVersion++;}
                 }
             }
-            Notify();
+            Interlocked.Increment(ref statusRevision);Notify();
         }
         async Task PollLoop() {
             try {
@@ -223,7 +234,7 @@ namespace CodexUsageSentinel {
                             sent=await Bot.Send(settings,"⚠️ Codex Usage Sentinel: три проверки подряд не удалось получить лимиты. Состояние неизвестно. Проверьте Codex и интернет на компьютере. Повторяющиеся сообщения о процентах приостановлены до получения свежих данных.",()=>{lock(gate)return !Paused && outagePending && outageVersion==version && settings==Settings;},cancel.Token);
                             if(sent) lock(gate) {outagePending=false;outageSent=true;SentCount++;}
                         }
-                        if(sent) {TelegramStatus="Доставлено в Telegram · "+DateTime.Now.ToString("HH:mm:ss");Notify();}
+                        if(sent) {TelegramStatus="Доставлено в Telegram · "+DateTime.Now.ToString("HH:mm:ss");Interlocked.Increment(ref statusBottomVersion);Notify();await PublishStatus(settings,true,false);}
                     } catch(DeliveryUncertain ex) {
                         lock(gate){if(item!=null){policy.Acknowledge(item);Persist();}else{outagePending=false;outageSent=true;}}
                         TelegramStatus=ex.Message;Notify();retryWait=10;
@@ -241,6 +252,7 @@ namespace CodexUsageSentinel {
                 (Latest!=null && Fresh ? Latest.Description() : "Свежие лимиты пока не получены.")+"\nТестовая серия уведомлений; интервал не менее 2 секунд.",()=>settings==Settings,cancel.Token);
             if(!sent)throw new InvalidOperationException("Настройки изменились. Тестовая серия остановлена.");
             TelegramStatus="Тест "+number+"/"+total+" доставлен · "+DateTime.Now.ToString("HH:mm:ss");SentCount++;Notify();
+            Interlocked.Increment(ref statusBottomVersion);await PublishStatus(settings,true,false);
         }
         public CancellationToken Token {get{return cancel.Token;}}
         public void Dispose() {cancel.Cancel();}

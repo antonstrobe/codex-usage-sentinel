@@ -9,6 +9,7 @@ dist/
 *.png
 settings*.json
 alerts*.json
+status-messages*.json
 auth.json
 .env
 .env.*

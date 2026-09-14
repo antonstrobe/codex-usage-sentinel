@@ -43,6 +43,8 @@ namespace CodexUsageSentinel {
         static int Drain(AlertPolicy policy) {int n=0;while(policy.Next(Now)!=null && n<1000){var item=policy.Next(Now);if(item.Continuous)break;policy.Acknowledge(item);n++;}return n;}
         static Settings TestSettings() {var settings=new Settings {ChatId=123,Username="example_user",BotUsername="ExampleOld_bot"};settings.SetToken("123456:"+new string('a',35));return settings;}
         static string Ok(object result) {return Json.Write(new {ok=true,result=result});}
+        static Settings StatusSettings(){var s=TestSettings();s.LiveStatusEnabled=true;s.RecipientMode="group";s.GroupChatId=-999;return s;}
+        static FakeTransport StatusTransport(){long id=100;var fake=new FakeTransport();fake.Reply=m=>{var body=Json.Read<object>(fake.Bodies.Last());return m=="deleteMessage" ? Ok(true) : Ok(new {message_id=m=="editMessageText" ? (long)Json.Number(Json.Get(body,"message_id")).Value : id++,chat=new {id=(long)Json.Number(Json.Get(body,"chat_id")).Value}});};return fake;}
         static AlarmRule Rule(string id="example-alarm",int percent=30,int count=7,int interval=15,bool continuous=false) {return new AlarmRule {Id=id,Percent=percent,MessageCount=count,IntervalSeconds=interval,Continuous=continuous};}
         [STAThread] public static int Main(string[] args) {
             if(args.Length==2 && (args[0]=="--render-alarms" || args[0]=="--render-alarm-editor" || args[0]=="--render-main" || args[0]=="--render-group")) {
@@ -332,6 +334,53 @@ namespace CodexUsageSentinel {
                         var current=monitor.Settings;Throws(()=>monitor.SelectRecipient("invalid"));Check(object.ReferenceEquals(current,monitor.Settings),"invalid mode unchanged");
                     }
                 }}finally{Storage.Root=previousRoot;foreach(string name in new[]{"settings.json","settings.json.new","alerts.json","alerts.json.new"}){string file=System.IO.Path.Combine(root,name);if(System.IO.File.Exists(file))System.IO.File.Delete(file);}if(System.IO.Directory.Exists(root))System.IO.Directory.Delete(root);}
+            });
+            Test("quiet status sends once then edits and survives restart",()=>{
+                var s=StatusSettings();var state=new StatusMessageState();string saved="";var fake=StatusTransport();
+                using(var bot=new Telegram(fake)){var publisher=new StatusPublisher(state,v=>saved=Json.Write(v));publisher.Update(bot,s,"45%",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();publisher.Update(bot,s,"44%",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();publisher.Update(bot,s,"44%",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();}
+                Check(fake.Methods.SequenceEqual(new[]{"sendMessage","editMessageText"}),"one message plus edit");Check(object.Equals(Json.Get(Json.Read<object>(fake.Bodies[0]),"disable_notification"),true),"silent creation");
+                var restarted=StatusTransport();using(var bot=new Telegram(restarted))new StatusPublisher(Json.Read<StatusMessageState>(saved),v=>{}).Update(bot,s,"43%",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();
+                Check(restarted.Methods.Single()=="editMessageText" && Json.Str(Json.Get(Json.Read<object>(restarted.Bodies[0]),"message_id"))=="100","same id after restart");
+            });
+            Test("alarm stays audible and new quiet status follows it without deleting alarm",()=>{
+                var s=StatusSettings();var fake=StatusTransport();var state=new StatusMessageState();
+                using(var bot=new Telegram(fake)){var publisher=new StatusPublisher(state,v=>{});publisher.Update(bot,s,"3%",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();bot.Send(s,"alarm",()=>true,CancellationToken.None).GetAwaiter().GetResult();publisher.Update(bot,s,"3%",true,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();}
+                Check(fake.Methods.SequenceEqual(new[]{"sendMessage","sendMessage","sendMessage","deleteMessage"}),"status below alarm then cleanup");
+                Check(object.Equals(Json.Get(Json.Read<object>(fake.Bodies[1]),"disable_notification"),false) && object.Equals(Json.Get(Json.Read<object>(fake.Bodies[2]),"disable_notification"),true),"sound only on alarm");
+                Check(Json.Str(Json.Get(Json.Read<object>(fake.Bodies[3]),"message_id"))=="100" && state.Messages.Values.Single().MessageId==102,"delete only old status");
+            });
+            Test("deleted status is recreated silently but edit denial does not duplicate",()=>{
+                foreach(bool missing in new[]{true,false}){var s=StatusSettings();var state=new StatusMessageState();state.Messages[StatusPublisher.Key(s)]=new StatusMessageRecord {MessageId=5,Text="old"};var fake=new FakeTransport {Reply=m=>m=="editMessageText" ? "{\"ok\":false,\"error_code\":400,\"description\":\""+(missing ? "Bad Request: message to edit not found" : "Bad Request: message can't be edited")+"\"}" : Ok(new {message_id=8,chat=new {id=-999}})};
+                    using(var bot=new Telegram(fake)){var publisher=new StatusPublisher(state,v=>{});if(missing)publisher.Update(bot,s,"new",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();else Throws(()=>publisher.Update(bot,s,"new",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult());}
+                    Check(fake.Methods.Count==(missing ? 2 : 1),"only explicit missing permits recreation");if(missing)Check(state.Messages.Values.Single().MessageId==8 && object.Equals(Json.Get(Json.Read<object>(fake.Bodies.Last()),"disable_notification"),true),"new silent status");
+                }
+            });
+            Test("Telegram unchanged status response succeeds",()=>{
+                var s=StatusSettings();var state=new StatusMessageState();state.Messages[StatusPublisher.Key(s)]=new StatusMessageRecord {MessageId=5,Text="old"};var fake=new FakeTransport {Reply=m=>"{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: message is not modified\"}"};using(var bot=new Telegram(fake))new StatusPublisher(state,v=>{}).Update(bot,s,"new",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();Check(fake.Methods.Count==1 && state.Messages.Values.Single().MessageId==5,"no duplicate");
+            });
+            Test("ambiguous status creation is not retried after restart",()=>{
+                var s=StatusSettings();string persisted="";var state=new StatusMessageState();var fake=new FakeTransport {Reply=m=>{throw new HttpRequestException("offline");}};
+                using(var bot=new Telegram(fake))Throws(()=>new StatusPublisher(state,v=>persisted=Json.Write(v)).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult());
+                var other=StatusTransport();using(var bot=new Telegram(other))Throws(()=>new StatusPublisher(Json.Read<StatusMessageState>(persisted),v=>{}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult());Check(other.Methods.Count==0,"no duplicate on uncertainty");
+            });
+            Test("status creation requires durable intent and post-send save failure preserves uncertainty",()=>{
+                foreach(bool afterSend in new[]{false,true}){var s=StatusSettings();var fake=StatusTransport();int saves=0;string persisted="";using(var bot=new Telegram(fake))Throws(()=>new StatusPublisher(new StatusMessageState(),v=>{if(!afterSend || saves++>0)throw new System.IO.IOException();persisted=Json.Write(v);}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult());Check(fake.Methods.Count==(afterSend ? 1 : 0),"safe persistence ordering");if(afterSend)Check(Json.Read<StatusMessageState>(persisted).Messages.Values.Single().Creating,"restart stays conservative");}
+            });
+            Test("explicit status recovery can create after uncertain result",()=>{
+                var s=StatusSettings();var state=new StatusMessageState();state.Messages[StatusPublisher.Key(s)]=new StatusMessageRecord {Creating=true};var fake=StatusTransport();using(var bot=new Telegram(fake))new StatusPublisher(state,v=>{}).Update(bot,s,"status",true,true,()=>true,CancellationToken.None).GetAwaiter().GetResult();Check(fake.Methods.Single()=="sendMessage" && !state.Messages.Values.Single().Creating,"manual retry");
+            });
+            Test("quiet status shares destination selection and does not update unselected chat",()=>{
+                var s=StatusSettings();var state=new StatusMessageState();var fake=StatusTransport();using(var bot=new Telegram(fake)){var p=new StatusPublisher(state,v=>{});p.Update(bot,s,"group",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();var personal=Json.Read<Settings>(Json.Write(s));personal.RecipientMode="private";p.Update(bot,personal,"private",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();p.Update(bot,s,"stale",false,false,()=>false,CancellationToken.None).GetAwaiter().GetResult();}
+                Check(state.Messages.Count==2 && fake.Methods.Count==2,"separate messages, cancelled stale write");Check(Json.Str(Json.Get(Json.Read<object>(fake.Bodies[0]),"chat_id"))=="-999" && Json.Str(Json.Get(Json.Read<object>(fake.Bodies[1]),"chat_id"))=="123","exclusive destinations");
+            });
+            Test("quiet status disabled or relay cannot create a message",()=>{
+                foreach(bool relay in new[]{false,true}){var s=StatusSettings();if(relay)s.ConnectionMode="relay";else s.LiveStatusEnabled=false;var fake=StatusTransport();using(var bot=new Telegram(fake))new StatusPublisher(new StatusMessageState(),v=>{}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();Check(fake.Methods.Count==0,"no send");}
+            });
+            Test("quiet status freshness is explicit and alarm pause does not hide percentages",()=>{
+                var usage=UsageAt(45);Check(StatusPublisher.Format(usage,true,true,Now).Contains("45%") && StatusPublisher.Format(usage,true,true,Now).Contains("на паузе"),"visible while paused");Check(StatusPublisher.Format(usage,false,false,Now).Contains("Нет свежих данных") && !StatusPublisher.Format(usage,true,false,Now.AddMinutes(3)).Contains("45%"),"no stale percentages presented as current");
+            });
+            Test("status rate limit is respected without ambiguous-create lock",()=>{
+                var s=StatusSettings();var state=new StatusMessageState();var fake=new FakeTransport {Reply=m=>"{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":12}}"};using(var bot=new Telegram(fake)){try{new StatusPublisher(state,v=>{}).Update(bot,s,"status",false,false,()=>true,CancellationToken.None).GetAwaiter().GetResult();throw new Exception();}catch(TelegramFailure ex){Check(ex.RateLimited && ex.RetrySeconds==13 && !state.Messages.Values.Single().Creating,"explicit rejection can retry later");}}
             });
             Console.WriteLine("RESULT "+passed+" passed; "+failed+" failed");return failed==0 ? 0 : 1;
         }

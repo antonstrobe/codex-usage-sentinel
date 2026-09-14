@@ -37,6 +37,7 @@ namespace CodexUsageSentinel {
         public string BotUsername = "";
         public string CodexPath = "";
         public string PausedUntilUtc = "";
+        public bool LiveStatusEnabled = false;
         public List<AlarmRule> Alarms = AlarmRule.Defaults();
         public long TargetChatId { get { return RecipientMode=="group" ? GroupChatId : RecipientMode=="private" ? ChatId : 0; } }
         public bool Ready { get {

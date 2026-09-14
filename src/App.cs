@@ -107,7 +107,7 @@ namespace CodexUsageSentinel {
         readonly ToolTip tips=Theme.Tooltips();
         readonly ToolStripMenuItem trayPause;
         Label remaining,subline,windows,health,telegram,detail,policy;
-        Button pause,test,telegramSetup,privateRecipient,groupRecipient;
+        Button pause,test,telegramSetup,privateRecipient,groupRecipient,liveStatusToggle;
         bool quitting,testing;
         public MainForm(Monitor monitor,bool trayStart,bool renderOnly,EventWaitHandle showEvent) {
             this.monitor=monitor;this.renderOnly=renderOnly;this.showEvent=showEvent;
@@ -148,6 +148,10 @@ namespace CodexUsageSentinel {
             groupRecipient=Theme.Button("В группу",()=>SelectRecipient("group"));buttons.Controls.Add(groupRecipient);
             var groupMenu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
             groupMenu.Items.Add("Выбрать другую группу…",null,(s,e)=>SetupGroup());groupRecipient.ContextMenuStrip=groupMenu;
+            liveStatusToggle=Theme.Button("Тихий статус выключен",()=>{try{monitor.ToggleLiveStatus();RefreshStatus();}catch{ShowError("Не удалось сохранить настройку тихого статуса.");}});
+            liveStatusToggle.AutoSize=false;liveStatusToggle.Width=198;liveStatusToggle.Font=new Font("Segoe UI",9);buttons.Controls.Add(liveStatusToggle);
+            var statusMenu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
+            statusMenu.Items.Add("Создать статус заново",null,(s,e)=>{if(!monitor.Settings.LiveStatusEnabled){ShowError("Сначала включите тихий статус.");return;}monitor.RecreateLiveStatus();});liveStatusToggle.ContextMenuStrip=statusMenu;
             root.Controls.Add(buttons,0,5);
             tray=new NotifyIcon {Icon=Icon,Text="Codex Usage Sentinel",Visible=!renderOnly};
             var menu=new ContextMenuStrip {BackColor=Theme.Panel,ForeColor=Theme.Text};
@@ -211,7 +215,7 @@ namespace CodexUsageSentinel {
             telegram.Text="Получатель: "+monitor.Settings.RecipientLabel+" · только этот чат\n"+(monitor.Settings.Ready ? "@"+monitor.Settings.BotUsername+" · "+monitor.TelegramStatus : "Выбранный чат не подключён · настройте Telegram или группу");
             string extra=usage!=null ? string.Join("; ",usage.Windows.Where(w=>!w.Core).Select(w=>w.Label+" "+w.Remaining.ToString("0.#")+"%")) : "";
             detail.Text=(monitor.Paused ? "Уведомления на паузе до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm") : "Ручной запуск · после перезагрузки запустите снова. Закрытие окна — в трей.")+
-                "\n"+(monitor.StorageStatus!="" ? monitor.StorageStatus : Storage.Warning!="" ? Storage.Warning : "Другие лимиты (справочно): "+(extra=="" ? "нет данных" : extra));
+                "\n"+(monitor.StorageStatus!="" ? monitor.StorageStatus : Storage.Warning!="" ? Storage.Warning : "Другие лимиты (справочно): "+(extra=="" ? "нет данных" : extra))+"\n"+monitor.LiveStatusText;
             bool paused=monitor.Paused;
             string pauseState=paused ? "Пауза уведомлений включена" : "Пауза уведомлений выключена";
             string pauseHint=paused ? "Сейчас: пауза включена. Автоматические уведомления приостановлены до "+DateTime.Parse(monitor.Settings.PausedUntilUtc,null,DateTimeStyles.RoundtripKind).ToLocalTime().ToString("HH:mm")+". Проверка лимитов продолжается.\nНажмите, чтобы возобновить уведомления." : "Сейчас: пауза выключена. Автоматические уведомления разрешены.\nНажмите, чтобы приостановить их на 30 минут. Проверка лимитов продолжится.";
@@ -223,6 +227,8 @@ namespace CodexUsageSentinel {
             test.Text=testing ? "Тест отправляется…" : "Тестовое сообщение";
             Theme.Describe(test,tips,testing ? "Сейчас программа отправляет тест. Дождитесь завершения; повторный запуск временно недоступен." : "Отправить одно сообщение: "+monitor.Settings.RecipientLabel+". Правая кнопка мыши или Shift+F10 — серия из 10 с интервалом не менее 2 секунд. Это разовое действие; пауза автоматических уведомлений не мешает тесту.");
             test.Enabled=monitor.Settings.Ready && !testing;
+            Theme.ToggleState(liveStatusToggle,tips,monitor.Settings.LiveStatusEnabled,monitor.Settings.LiveStatusEnabled ? "Тихий статус включён" : "Тихий статус выключен",
+                (monitor.Settings.LiveStatusEnabled ? "Сейчас включено: одно тихое сообщение с процентами обновляется каждую минуту. Нажмите, чтобы остановить обновления; сообщение останется с временем последнего обновления." : "Сейчас выключено. Нажмите, чтобы включить тихое сообщение с процентами в выбранном чате.")+"\nПосле будильника статус переносится вниз; предыдущий статус удаляется. Пауза будильников не останавливает тихий статус.\nПравая кнопка или Shift+F10 — создать статус заново, если результат создания потерян. Неподтверждённое старое сообщение при этом может остаться.");
             tray.Text="Codex: "+(fresh ? remaining.Text+" осталось" : "нет свежих данных")+(monitor.Paused ? " · пауза" : "");
         }
     }
