@@ -26,3 +26,6 @@ __pycache__/
 *.db
 relay/config.json
 *.cred
+server/config.json
+server/state.json
+server-mode.json

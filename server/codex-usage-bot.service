@@ -1,0 +1,38 @@
+[Unit]
+Description=Codex Usage Sentinel Telegram controls and alarms
+Wants=network-online.target codex-usage-source.service
+After=network-online.target codex-usage-source.service
+
+[Service]
+Type=simple
+User=codex-usage-bot
+Group=codex-usage
+WorkingDirectory=/opt/codex-usage-sentinel/current
+Environment=LANG=C.UTF-8
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredentialEncrypted=telegram-token:/etc/credstore.encrypted/codex-usage-bot.cred
+ExecStart=/usr/bin/python3 -m server.bot --config /etc/codex-usage-bot/config.json
+StateDirectory=codex-usage-bot codex-usage-control
+StateDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+MemoryMax=128M
+TasksMax=16
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+InaccessiblePaths=-/var/lib/chat-audit-ai -/var/lib/chat-audit-bot
+ReadOnlyPaths=/var/lib/codex-usage-source
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

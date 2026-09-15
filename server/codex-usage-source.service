@@ -1,0 +1,40 @@
+[Unit]
+Description=Read-only Codex usage source from the WeChat CLI profile
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=chat-audit-ai
+Group=codex-usage
+WorkingDirectory=/opt/codex-usage-sentinel/current
+Environment=HOME=/var/lib/chat-audit-ai
+Environment=CODEX_HOME=/var/lib/chat-audit-ai/.codex
+Environment=LANG=C.UTF-8
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m server.collector --command /usr/bin/codex --workspace /var/lib/chat-audit-ai/workspace --source-service chat-audit-codex.service --output /var/lib/codex-usage-source/snapshot.json --request /var/lib/codex-usage-control/refresh
+StateDirectory=codex-usage-source
+StateDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=35
+MemoryMax=384M
+TasksMax=48
+CPUQuota=50%
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+ReadWritePaths=/var/lib/chat-audit-ai/.codex
+ReadOnlyPaths=-/var/lib/codex-usage-control
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "owner_chat_id": 123456789,
+  "group_chat_id": -100123456789,
+  "group_title": "Codex",
+  "allowed_users": [123456789],
+  "pending_usernames": [],
+  "state_path": "/var/lib/codex-usage-bot/state.json",
+  "snapshot_path": "/var/lib/codex-usage-source/snapshot.json",
+  "refresh_path": "/var/lib/codex-usage-control/refresh"
+}

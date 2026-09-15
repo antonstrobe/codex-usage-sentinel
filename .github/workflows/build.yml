@@ -19,6 +19,8 @@ jobs:
         run: .\test.ps1
       - name: Test shared bot relay
         run: python -B -m unittest discover -s relay -v
+      - name: Test Telegram server controls
+        run: python -B -m unittest server.test_server -v
       - name: Verify release files
         shell: powershell
         run: .\verify-release.ps1
@@ -31,3 +33,11 @@ jobs:
           Start-MpScan -ScanType CustomScan -ScanPath (Join-Path $PWD 'dist')
           $threats = @(Get-MpThreatDetection | Where-Object { ($_.Resources -join ' ') -like ('*' + $PWD.Path + '*') })
           if ($threats.Count -gt 0) { throw 'Defender detected a threat in release files.' }
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test server on Linux
+        run: python3 -B -m unittest server.test_server -v
+      - name: Validate Python syntax
+        run: python3 -c "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in pathlib.Path('server').glob('*.py')]"
